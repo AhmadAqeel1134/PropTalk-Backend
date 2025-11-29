@@ -9,6 +9,14 @@ class RealEstateAgentStats(BaseModel):
     unverified_agents: int
 
 
+class OverallStats(BaseModel):
+    total_properties: int
+    total_documents: int
+    total_phone_numbers: int
+    total_contacts: int
+
+
 class AdminDashboardResponse(BaseModel):
     real_estate_agents: RealEstateAgentStats
+    overall_stats: OverallStats
 

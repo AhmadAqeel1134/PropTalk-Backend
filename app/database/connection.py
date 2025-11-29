@@ -46,6 +46,8 @@ engine = create_async_engine(
     future=True,
     pool_pre_ping=True,  # Verify connections before using them
     pool_recycle=3600,  # Recycle connections after 1 hour
+    pool_size=10,  # Number of connections to maintain
+    max_overflow=20,  # Maximum overflow connections
     connect_args=get_connect_args()
 )
 

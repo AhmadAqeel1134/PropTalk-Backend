@@ -2,6 +2,13 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional
 
 
+class AgentSummaryStats(BaseModel):
+    properties_count: int
+    documents_count: int
+    contacts_count: int
+    has_phone_number: bool
+
+
 class RealEstateAgentResponse(BaseModel):
     id: str
     email: str
@@ -13,6 +20,7 @@ class RealEstateAgentResponse(BaseModel):
     is_verified: bool
     created_at: str
     updated_at: str
+    stats: Optional[AgentSummaryStats] = None
 
     class Config:
         from_attributes = True
