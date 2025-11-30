@@ -6,6 +6,11 @@ from app.services.document_service import (
     get_documents_by_agent_id,
     delete_document
 )
+from app.services.real_estate_agent.document_service import (
+    get_document_details,
+    get_document_properties,
+    get_document_contacts,
+)
 from app.utils.dependencies import get_current_real_estate_agent_id
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
@@ -72,4 +77,41 @@ async def delete_document_endpoint(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found or unauthorized"
         )
+
+
+@router.get("/{document_id}", response_model=dict)
+async def get_document_endpoint(
+    document_id: str,
+    agent_id: str = Depends(get_current_real_estate_agent_id)
+):
+    """Get document details with extracted data counts"""
+    doc = await get_document_details(document_id, agent_id)
+    
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found"
+        )
+    
+    return doc
+
+
+@router.get("/{document_id}/properties", response_model=List[dict])
+async def get_document_properties_endpoint(
+    document_id: str,
+    agent_id: str = Depends(get_current_real_estate_agent_id)
+):
+    """Get all properties extracted from a document"""
+    properties = await get_document_properties(document_id, agent_id)
+    return properties
+
+
+@router.get("/{document_id}/contacts", response_model=List[dict])
+async def get_document_contacts_endpoint(
+    document_id: str,
+    agent_id: str = Depends(get_current_real_estate_agent_id)
+):
+    """Get all contacts extracted from a document"""
+    contacts = await get_document_contacts(document_id, agent_id)
+    return contacts
 
