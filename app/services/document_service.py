@@ -104,11 +104,41 @@ async def upload_document(
 
 
 async def get_documents_by_agent_id(real_estate_agent_id: str) -> List[dict]:
-    """Get all documents for a real estate agent"""
+    """Get all documents for a real estate agent with extracted counts"""
     async with AsyncSessionLocal() as session:
-        stmt = select(Document).where(Document.real_estate_agent_id == real_estate_agent_id)
+        from sqlalchemy import func
+        from app.models.property import Property
+        
+        stmt = select(Document).where(Document.real_estate_agent_id == real_estate_agent_id).order_by(Document.created_at.desc())
         result = await session.execute(stmt)
         docs = result.scalars().all()
+        
+        if not docs:
+            return []
+        
+        # Get properties counts per document in single query
+        doc_ids = [doc.id for doc in docs]
+        properties_stmt = select(
+            Property.document_id,
+            func.count(Property.id).label('count')
+        ).where(
+            Property.document_id.in_(doc_ids)
+        ).group_by(Property.document_id)
+        
+        properties_result = await session.execute(properties_stmt)
+        properties_counts = {row[0]: row[1] for row in properties_result.all()}
+        
+        # Get contacts counts per document (distinct contacts linked to properties from each doc)
+        contacts_stmt = select(
+            Property.document_id,
+            func.count(func.distinct(Property.contact_id)).label('count')
+        ).where(
+            Property.document_id.in_(doc_ids),
+            Property.contact_id.isnot(None)
+        ).group_by(Property.document_id)
+        
+        contacts_result = await session.execute(contacts_stmt)
+        contacts_counts = {row[0]: row[1] for row in contacts_result.all()}
         
         return [
             {
@@ -119,6 +149,8 @@ async def get_documents_by_agent_id(real_estate_agent_id: str) -> List[dict]:
                 "file_size": doc.file_size,
                 "cloudinary_url": doc.cloudinary_url,
                 "description": doc.description,
+                "properties_count": properties_counts.get(doc.id, 0),
+                "contacts_count": contacts_counts.get(doc.id, 0),
                 "created_at": doc.created_at.isoformat() if doc.created_at else "",
                 "updated_at": doc.updated_at.isoformat() if doc.updated_at else "",
             }
