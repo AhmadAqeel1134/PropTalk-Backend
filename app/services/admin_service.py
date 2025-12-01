@@ -1,18 +1,15 @@
 from typing import Optional, List
-from sqlalchemy import select
+from sqlalchemy import select, func, desc
 from app.database.connection import AsyncSessionLocal
 from app.models.real_estate_agent import RealEstateAgent
 from app.models.property import Property
 from app.models.document import Document
+from app.models.contact import Contact
 from app.models.phone_number import PhoneNumber
 
 
 async def get_agent_full_details(agent_id: str) -> Optional[dict]:
     """Get full details of an agent including all related data - OPTIMIZED with single session"""
-    from app.models.property import Property
-    from app.models.document import Document
-    from app.models.phone_number import PhoneNumber
-    
     # OPTIMIZATION: Use single session and batch queries
     async with AsyncSessionLocal() as session:
         # Get agent
@@ -107,8 +104,23 @@ async def get_agent_full_details(agent_id: str) -> Optional[dict]:
                 "updated_at": phone_obj.updated_at.isoformat() if phone_obj.updated_at else "",
             }
         
-        # Get contacts (empty list until Contact model is created)
-        contacts = []
+        # Get contacts
+        contacts_stmt = select(Contact).where(Contact.real_estate_agent_id == agent_id)
+        contacts_result = await session.execute(contacts_stmt)
+        contacts_objs = contacts_result.scalars().all()
+        contacts = [
+            {
+                "id": c.id,
+                "real_estate_agent_id": c.real_estate_agent_id,
+                "name": c.name,
+                "phone_number": c.phone_number,
+                "email": c.email,
+                "notes": c.notes,
+                "created_at": c.created_at.isoformat() if c.created_at else "",
+                "updated_at": c.updated_at.isoformat() if c.updated_at else "",
+            }
+            for c in contacts_objs
+        ]
         
         return {
             "agent": agent,
@@ -154,6 +166,59 @@ async def get_agent_properties_for_admin(agent_id: str) -> Optional[List[dict]]:
         ]
 
 
+async def get_agent_properties_paginated_for_admin(
+    agent_id: str,
+    page: int = 1,
+    page_size: int = 16
+) -> Optional[tuple[List[dict], int]]:
+    """Get paginated properties for an agent (admin view)"""
+    async with AsyncSessionLocal() as session:
+        # Base query
+        base_stmt = select(Property).where(Property.real_estate_agent_id == agent_id)
+        
+        # Total count
+        count_stmt = select(func.count()).select_from(Property).where(Property.real_estate_agent_id == agent_id)
+        count_result = await session.execute(count_stmt)
+        total = count_result.scalar_one() or 0
+        
+        # Paginated query, latest first
+        stmt = (
+            base_stmt
+            .order_by(desc(Property.created_at))
+            .offset(max(page - 1, 0) * page_size)
+            .limit(page_size)
+        )
+        result = await session.execute(stmt)
+        props = result.scalars().all()
+        
+        items = [
+            {
+                "id": prop.id,
+                "real_estate_agent_id": prop.real_estate_agent_id,
+                "document_id": prop.document_id,
+                "property_type": prop.property_type,
+                "address": prop.address,
+                "city": prop.city,
+                "state": prop.state,
+                "zip_code": prop.zip_code,
+                "price": str(prop.price) if prop.price else None,
+                "bedrooms": prop.bedrooms,
+                "bathrooms": prop.bathrooms,
+                "square_feet": prop.square_feet,
+                "description": prop.description,
+                "amenities": prop.amenities,
+                "owner_name": prop.owner_name,
+                "owner_phone": prop.owner_phone,
+                "is_available": prop.is_available,
+                "created_at": prop.created_at.isoformat() if prop.created_at else "",
+                "updated_at": prop.updated_at.isoformat() if prop.updated_at else "",
+            }
+            for prop in props
+        ]
+        
+        return items, total
+
+
 async def get_agent_documents_for_admin(agent_id: str) -> Optional[List[dict]]:
     """Get all documents for an agent (admin view) - OPTIMIZED"""
     # OPTIMIZATION: Skip agent verification - saves one query
@@ -178,10 +243,78 @@ async def get_agent_documents_for_admin(agent_id: str) -> Optional[List[dict]]:
         ]
 
 
+async def get_agent_documents_paginated_for_admin(
+    agent_id: str,
+    page: int = 1,
+    page_size: int = 16
+) -> Optional[tuple[List[dict], int]]:
+    """Get paginated documents for an agent (admin view)"""
+    async with AsyncSessionLocal() as session:
+        # Base query
+        base_stmt = select(Document).where(Document.real_estate_agent_id == agent_id)
+        
+        # Total count
+        count_stmt = select(func.count()).select_from(Document).where(Document.real_estate_agent_id == agent_id)
+        count_result = await session.execute(count_stmt)
+        total = count_result.scalar_one() or 0
+        
+        # Paginated query, latest first
+        stmt = (
+            base_stmt
+            .order_by(desc(Document.created_at))
+            .offset(max(page - 1, 0) * page_size)
+            .limit(page_size)
+        )
+        result = await session.execute(stmt)
+        docs = result.scalars().all()
+        
+        items = [
+            {
+                "id": doc.id,
+                "real_estate_agent_id": doc.real_estate_agent_id,
+                "file_name": doc.file_name,
+                "file_type": doc.file_type,
+                "file_size": doc.file_size,
+                "cloudinary_url": doc.cloudinary_url,
+                "description": doc.description,
+                "created_at": doc.created_at.isoformat() if doc.created_at else "",
+                "updated_at": doc.updated_at.isoformat() if doc.updated_at else "",
+            }
+            for doc in docs
+        ]
+        
+        return items, total
+
+
 async def get_agent_contacts_for_admin(agent_id: str) -> Optional[List[dict]]:
     """Get all contacts for an agent (admin view)"""
-    # Return empty list until Contact model is created
-    return []
+    async with AsyncSessionLocal() as session:
+        # Verify agent exists
+        agent_stmt = select(RealEstateAgent).where(RealEstateAgent.id == agent_id)
+        agent_result = await session.execute(agent_stmt)
+        agent = agent_result.scalar_one_or_none()
+        
+        if not agent:
+            return None
+        
+        # Get all contacts for this agent
+        contacts_stmt = select(Contact).where(Contact.real_estate_agent_id == agent_id)
+        contacts_result = await session.execute(contacts_stmt)
+        contacts = contacts_result.scalars().all()
+        
+        return [
+            {
+                "id": contact.id,
+                "real_estate_agent_id": contact.real_estate_agent_id,
+                "name": contact.name,
+                "phone_number": contact.phone_number,
+                "email": contact.email,
+                "notes": contact.notes,
+                "created_at": contact.created_at.isoformat() if contact.created_at else "",
+                "updated_at": contact.updated_at.isoformat() if contact.updated_at else "",
+            }
+            for contact in contacts
+        ]
 
 
 async def get_agent_phone_number_for_admin(agent_id: str) -> Optional[dict]:

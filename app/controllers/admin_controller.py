@@ -3,8 +3,8 @@ from typing import List, Optional
 from app.schemas.real_estate_agent import RealEstateAgentResponse, RealEstateAgentUpdateRequest
 from app.schemas.admin_dashboard import AdminDashboardResponse
 from app.schemas.admin import AgentFullDetailsResponse
-from app.schemas.property import PropertyResponse
-from app.schemas.document import DocumentResponse
+from app.schemas.property import PropertyResponse, PaginatedPropertiesResponse
+from app.schemas.document import DocumentResponse, PaginatedDocumentsResponse
 from app.schemas.phone_number import PhoneNumberResponse
 from app.services.real_estate_agent_service import (
     get_all_real_estate_agents,
@@ -15,7 +15,9 @@ from app.services.admin_dashboard_service import get_admin_dashboard_stats
 from app.services.admin_service import (
     get_agent_full_details,
     get_agent_properties_for_admin,
+    get_agent_properties_paginated_for_admin,
     get_agent_documents_for_admin,
+    get_agent_documents_paginated_for_admin,
     get_agent_contacts_for_admin,
     get_agent_phone_number_for_admin
 )
@@ -133,7 +135,7 @@ async def get_agent_properties(
     agent_id: str,
     admin_id: str = Depends(get_current_admin_id)
 ):
-    """Get all properties for an agent (Admin only)"""
+    """Get all properties for an agent (Admin only) - Legacy endpoint for full details"""
     properties = await get_agent_properties_for_admin(agent_id)
     
     if properties is None:
@@ -145,12 +147,38 @@ async def get_agent_properties(
     return [PropertyResponse(**prop) for prop in properties]
 
 
+@router.get("/real-estate-agents/{agent_id}/properties/paginated", response_model=PaginatedPropertiesResponse)
+async def get_agent_properties_paginated(
+    agent_id: str,
+    page: int = 1,
+    page_size: int = 16,
+    admin_id: str = Depends(get_current_admin_id)
+):
+    """Get paginated properties for an agent (Admin only)"""
+    result = await get_agent_properties_paginated_for_admin(agent_id, page=page, page_size=page_size)
+    
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Real estate agent not found"
+        )
+    
+    properties, total = result
+    
+    return PaginatedPropertiesResponse(
+        items=[PropertyResponse(**prop) for prop in properties],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
 @router.get("/real-estate-agents/{agent_id}/documents", response_model=List[DocumentResponse])
 async def get_agent_documents(
     agent_id: str,
     admin_id: str = Depends(get_current_admin_id)
 ):
-    """Get all documents for an agent (Admin only)"""
+    """Get all documents for an agent (Admin only) - Legacy endpoint for full details"""
     documents = await get_agent_documents_for_admin(agent_id)
     
     if documents is None:
@@ -160,6 +188,32 @@ async def get_agent_documents(
         )
     
     return [DocumentResponse(**doc) for doc in documents]
+
+
+@router.get("/real-estate-agents/{agent_id}/documents/paginated", response_model=PaginatedDocumentsResponse)
+async def get_agent_documents_paginated(
+    agent_id: str,
+    page: int = 1,
+    page_size: int = 16,
+    admin_id: str = Depends(get_current_admin_id)
+):
+    """Get paginated documents for an agent (Admin only)"""
+    result = await get_agent_documents_paginated_for_admin(agent_id, page=page, page_size=page_size)
+    
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Real estate agent not found"
+        )
+    
+    documents, total = result
+    
+    return PaginatedDocumentsResponse(
+        items=[DocumentResponse(**doc) for doc in documents],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.get("/real-estate-agents/{agent_id}/contacts", response_model=List[dict])

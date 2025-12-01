@@ -53,7 +53,7 @@ async def google_login(request: GoogleTokenRequest):
                 data={
                     "sub": agent["id"],
                     "email": agent["email"],
-                    "type": "agent"
+                    "type": "real_estate_agent"
                 }
             )
             

@@ -7,6 +7,7 @@ from app.models.document import Document
 from app.models.property import Property
 from app.services.cloudinary_service import upload_file_to_cloudinary, delete_file_from_cloudinary
 from app.services.document_parser_service import parse_document
+from app.services.real_estate_agent.contact_service import find_or_create_contact_by_phone
 
 
 async def upload_document(
@@ -39,17 +40,35 @@ async def upload_document(
         await session.commit()
         await session.refresh(new_document)
         
-        # Parse document and extract properties
+        # Parse document and extract properties + contacts
         try:
-            parsed_properties = await parse_document(file_content, file_type)
+            parsed_data = await parse_document(file_content, file_type)
+            parsed_properties = parsed_data.get("properties", [])
+            parsed_contacts = parsed_data.get("contacts", [])
             
-            # Save properties to database
+            # First, create/find contacts and build phone->contact_id mapping
+            phone_to_contact_id = {}
+            for contact_data in parsed_contacts:
+                contact = await find_or_create_contact_by_phone(
+                    real_estate_agent_id=real_estate_agent_id,
+                    name=contact_data["name"],
+                    phone_number=contact_data["phone_number"],
+                    email=contact_data.get("email")
+                )
+                phone_to_contact_id[contact_data["phone_number"]] = contact["id"]
+            
+            # Save properties to database and link to contacts
             for prop_data in parsed_properties:
+                owner_phone = prop_data.get("owner_phone", "")
+                normalized_phone = ''.join(filter(str.isdigit, owner_phone))
+                contact_id = phone_to_contact_id.get(normalized_phone)
+                
                 property_id = str(uuid.uuid4())
                 new_property = Property(
                     id=property_id,
                     real_estate_agent_id=real_estate_agent_id,
                     document_id=document_id,
+                    contact_id=contact_id,  # Link to contact for Twilio integration
                     property_type=prop_data.get("property_type"),
                     address=prop_data.get("address", ""),
                     city=prop_data.get("city"),
@@ -85,11 +104,41 @@ async def upload_document(
 
 
 async def get_documents_by_agent_id(real_estate_agent_id: str) -> List[dict]:
-    """Get all documents for a real estate agent"""
+    """Get all documents for a real estate agent with extracted counts"""
     async with AsyncSessionLocal() as session:
-        stmt = select(Document).where(Document.real_estate_agent_id == real_estate_agent_id)
+        from sqlalchemy import func
+        from app.models.property import Property
+        
+        stmt = select(Document).where(Document.real_estate_agent_id == real_estate_agent_id).order_by(Document.created_at.desc())
         result = await session.execute(stmt)
         docs = result.scalars().all()
+        
+        if not docs:
+            return []
+        
+        # Get properties counts per document in single query
+        doc_ids = [doc.id for doc in docs]
+        properties_stmt = select(
+            Property.document_id,
+            func.count(Property.id).label('count')
+        ).where(
+            Property.document_id.in_(doc_ids)
+        ).group_by(Property.document_id)
+        
+        properties_result = await session.execute(properties_stmt)
+        properties_counts = {row[0]: row[1] for row in properties_result.all()}
+        
+        # Get contacts counts per document (distinct contacts linked to properties from each doc)
+        contacts_stmt = select(
+            Property.document_id,
+            func.count(func.distinct(Property.contact_id)).label('count')
+        ).where(
+            Property.document_id.in_(doc_ids),
+            Property.contact_id.isnot(None)
+        ).group_by(Property.document_id)
+        
+        contacts_result = await session.execute(contacts_stmt)
+        contacts_counts = {row[0]: row[1] for row in contacts_result.all()}
         
         return [
             {
@@ -100,6 +149,8 @@ async def get_documents_by_agent_id(real_estate_agent_id: str) -> List[dict]:
                 "file_size": doc.file_size,
                 "cloudinary_url": doc.cloudinary_url,
                 "description": doc.description,
+                "properties_count": properties_counts.get(doc.id, 0),
+                "contacts_count": contacts_counts.get(doc.id, 0),
                 "created_at": doc.created_at.isoformat() if doc.created_at else "",
                 "updated_at": doc.updated_at.isoformat() if doc.updated_at else "",
             }

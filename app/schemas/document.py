@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 
 class DocumentResponse(BaseModel):
@@ -26,4 +26,11 @@ class DocumentUploadResponse(BaseModel):
     cloudinary_url: str
     description: Optional[str] = None
     created_at: str
+
+
+class PaginatedDocumentsResponse(BaseModel):
+    items: List[DocumentResponse]
+    total: int
+    page: int
+    page_size: int
 

@@ -4,6 +4,7 @@ from app.models.real_estate_agent import RealEstateAgent
 from app.models.phone_number import PhoneNumber
 from app.models.document import Document
 from app.models.property import Property
+from app.models.contact import Contact
 
 __all__ = [
     "Admin",
@@ -11,4 +12,5 @@ __all__ = [
     "PhoneNumber",
     "Document",
     "Property",
+    "Contact",
 ]
