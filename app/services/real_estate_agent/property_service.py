@@ -2,8 +2,8 @@
 Property Service - Enhanced property management for real estate agents
 Optimized with filters and ready for Twilio integration
 """
-from typing import Optional, List, Dict
-from sqlalchemy import select, update, delete, or_, and_
+from typing import Optional, List, Dict, Tuple
+from sqlalchemy import select, or_, and_, desc, func
 from app.database.connection import AsyncSessionLocal
 from app.models.property import Property
 import uuid
@@ -78,47 +78,63 @@ async def get_properties_by_agent_id(
     property_type: Optional[str] = None,
     city: Optional[str] = None,
     is_available: Optional[str] = None,
-    contact_id: Optional[str] = None
-) -> List[dict]:
+    contact_id: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 16,
+) -> Tuple[List[dict], int]:
     """
-    Get all properties for an agent with filters
-    Optimized with indexed columns for fast filtering
+    Get all properties for an agent with filters.
+    All filtering, sorting, and pagination is done server-side for performance.
+    Results are ordered by created_at DESC (latest first) by default.
+    Returns (items, total).
     """
     async with AsyncSessionLocal() as session:
-        stmt = select(Property).where(Property.real_estate_agent_id == real_estate_agent_id)
-        
+        # Base conditions
+        conditions = [Property.real_estate_agent_id == real_estate_agent_id]
+
         # Apply filters (using indexed columns for performance)
-        filters = []
-        
         if search:
             search_pattern = f"%{search}%"
-            filters.append(
+            conditions.append(
                 or_(
                     Property.address.ilike(search_pattern),
                     Property.city.ilike(search_pattern),
-                    Property.state.ilike(search_pattern)
+                    Property.state.ilike(search_pattern),
                 )
             )
-        
+
         if property_type:
-            filters.append(Property.property_type == property_type)
-        
+            conditions.append(Property.property_type == property_type)
+
         if city:
-            filters.append(Property.city.ilike(f"%{city}%"))
-        
+            conditions.append(Property.city.ilike(f"%{city}%"))
+
         if is_available:
-            filters.append(Property.is_available == is_available.lower())
-        
+            conditions.append(Property.is_available == is_available.lower())
+
         if contact_id:
-            filters.append(Property.contact_id == contact_id)
-        
-        if filters:
-            stmt = stmt.where(and_(*filters))
-        
+            conditions.append(Property.contact_id == contact_id)
+
+        where_clause = and_(*conditions)
+
+        # Total count for pagination
+        count_stmt = select(func.count()).select_from(Property).where(where_clause)
+        total_result = await session.execute(count_stmt)
+        total = total_result.scalar_one() or 0
+
+        # Paged query, latest first
+        stmt = (
+            select(Property)
+            .where(where_clause)
+            .order_by(desc(Property.created_at))
+            .offset(max(page - 1, 0) * page_size)
+            .limit(page_size)
+        )
+
         result = await session.execute(stmt)
         props = result.scalars().all()
-        
-        return [
+
+        items = [
             {
                 "id": prop.id,
                 "real_estate_agent_id": prop.real_estate_agent_id,
@@ -143,6 +159,8 @@ async def get_properties_by_agent_id(
             }
             for prop in props
         ]
+
+        return items, total
 
 
 async def get_property_by_id(property_id: str, real_estate_agent_id: str) -> Optional[dict]:

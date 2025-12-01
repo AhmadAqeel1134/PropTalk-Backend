@@ -3,8 +3,8 @@ Property Controller - Enhanced property management endpoints
 Optimized with filters and ready for Twilio integration
 """
 from fastapi import APIRouter, HTTPException, Depends, status
-from typing import List, Optional
-from app.schemas.property import PropertyResponse, PropertyCreateRequest, PropertyUpdateRequest
+from typing import Optional
+from app.schemas.property import PropertyResponse, PropertyCreateRequest, PropertyUpdateRequest, PaginatedPropertiesResponse
 from app.services.real_estate_agent.property_service import (
     create_property,
     get_properties_by_agent_id,
@@ -17,28 +17,37 @@ from app.utils.dependencies import get_current_real_estate_agent_id
 router = APIRouter(prefix="/properties", tags=["Properties"])
 
 
-@router.get("/my-properties", response_model=List[PropertyResponse])
+@router.get("/my-properties", response_model=PaginatedPropertiesResponse)
 async def get_my_properties(
     search: Optional[str] = None,
     property_type: Optional[str] = None,
     city: Optional[str] = None,
     is_available: Optional[str] = None,
     contact_id: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 16,
     agent_id: str = Depends(get_current_real_estate_agent_id)
 ):
     """
     Get all properties for current agent with filters
     Optimized with indexed columns for fast filtering
     """
-    props = await get_properties_by_agent_id(
+    props, total = await get_properties_by_agent_id(
         real_estate_agent_id=agent_id,
         search=search,
         property_type=property_type,
         city=city,
         is_available=is_available,
-        contact_id=contact_id
+        contact_id=contact_id,
+        page=page,
+        page_size=page_size,
     )
-    return [PropertyResponse(**prop) for prop in props]
+    return PaginatedPropertiesResponse(
+        items=[PropertyResponse(**prop) for prop in props],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.post("", response_model=PropertyResponse, status_code=status.HTTP_201_CREATED)
