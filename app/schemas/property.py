@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 
 
 class PropertyResponse(BaseModel):
@@ -62,4 +62,11 @@ class PropertyUpdateRequest(BaseModel):
     owner_phone: Optional[str] = None
     is_available: Optional[str] = None
     contact_id: Optional[str] = None  # Link to contact
+
+
+class PaginatedPropertiesResponse(BaseModel):
+    items: List[PropertyResponse]
+    total: int
+    page: int
+    page_size: int
 
