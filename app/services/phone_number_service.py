@@ -4,7 +4,7 @@ import uuid
 from sqlalchemy import select
 from app.database.connection import AsyncSessionLocal
 from app.models.phone_number import PhoneNumber
-from app.services.twilio_service import purchase_phone_number, release_phone_number
+from app.services.twilio_service.client import purchase_phone_number, release_phone_number
 
 
 async def assign_phone_number_to_agent(real_estate_agent_id: str, area_code: Optional[str] = None) -> dict:
