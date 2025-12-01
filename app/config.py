@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     TWILIO_ACCOUNT_SID: Optional[str] = None
     TWILIO_AUTH_TOKEN: Optional[str] = None
     TWILIO_PHONE_NUMBER: Optional[str] = None
+    TWILIO_VOICE_WEBHOOK_URL: Optional[str] = None  # Base URL for webhooks (ngrok or production)
     
     OPENAI_API_KEY: Optional[str] = None
     

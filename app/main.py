@@ -13,6 +13,9 @@ from app.controllers.real_estate_agent.contact_controller import router as conta
 from app.controllers.real_estate_agent.dashboard_controller import router as agent_dashboard_router
 from app.controllers.real_estate_agent.property_controller import router as agent_property_router
 from app.controllers.real_estate_agent.profile_controller import router as agent_profile_router
+from app.controllers.voice_agent_controller import router as voice_agent_router
+from app.controllers.call_controller import router as call_router
+from app.controllers.twilio_controller.webhook_controller import router as webhook_router
 import logging
 
 logger = logging.getLogger(__name__)
@@ -61,6 +64,9 @@ app.include_router(contact_router)
 app.include_router(agent_dashboard_router)
 app.include_router(agent_property_router)
 app.include_router(agent_profile_router)
+app.include_router(voice_agent_router)
+app.include_router(call_router)
+app.include_router(webhook_router)
 
 
 @app.get("/")
