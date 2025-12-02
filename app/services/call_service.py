@@ -64,7 +64,9 @@ async def initiate_call(
             id=call_id,
             voice_agent_id=voice_agent.id,
             real_estate_agent_id=real_estate_agent_id,
-            twilio_call_sid="",  # Will be updated when Twilio responds
+            # Use a temporary unique value for twilio_call_sid to satisfy unique constraint,
+            # then overwrite it with the real Twilio SID once the API call succeeds.
+            twilio_call_sid=call_id,
             contact_id=contact_id,
             from_number=voice_agent.phone_number.twilio_phone_number,
             to_number=phone_number,

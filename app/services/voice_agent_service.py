@@ -12,7 +12,10 @@ from app.models.voice_agent_request import VoiceAgentRequest
 from app.models.voice_agent import VoiceAgent
 from app.models.real_estate_agent import RealEstateAgent
 from app.models.phone_number import PhoneNumber
-from app.services.phone_number_service import assign_phone_number_to_agent
+from app.services.phone_number_service import (
+    assign_phone_number_to_agent,
+    assign_existing_phone_number_to_agent,
+)
 
 
 # Default system prompts
@@ -98,8 +101,12 @@ async def get_voice_agent_request(real_estate_agent_id: str) -> Optional[Dict]:
         }
 
 
-async def approve_voice_agent_request(request_id: str, admin_id: str) -> Dict:
-    """Admin approves voice agent request - creates voice agent and assigns phone number"""
+async def approve_voice_agent_request(request_id: str, admin_id: str, phone_number: Optional[str] = None) -> Dict:
+    """Admin approves voice agent request - creates voice agent and assigns phone number.
+
+    If phone_number is provided, we attach an existing Twilio number from the admin's
+    Twilio account. Otherwise, we auto-purchase a new number.
+    """
     async with AsyncSessionLocal() as session:
         # Get request
         stmt = select(VoiceAgentRequest).where(VoiceAgentRequest.id == request_id)
@@ -127,9 +134,16 @@ async def approve_voice_agent_request(request_id: str, admin_id: str) -> Dict:
         if existing_voice_agent.scalar_one_or_none():
             raise ValueError("Agent already has a voice agent")
         
-        # Assign phone number (this will purchase from Twilio)
+        # Assign phone number
         try:
-            phone_data = await assign_phone_number_to_agent(request.real_estate_agent_id)
+            if phone_number:
+                # Use an existing Twilio number (already purchased in console)
+                phone_data = await assign_existing_phone_number_to_agent(
+                    request.real_estate_agent_id, phone_number
+                )
+            else:
+                # Auto-purchase a new number from Twilio
+                phone_data = await assign_phone_number_to_agent(request.real_estate_agent_id)
         except Exception as e:
             raise ValueError(f"Failed to assign phone number: {str(e)}")
         

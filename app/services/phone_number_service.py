@@ -4,7 +4,11 @@ import uuid
 from sqlalchemy import select
 from app.database.connection import AsyncSessionLocal
 from app.models.phone_number import PhoneNumber
-from app.services.twilio_service.client import purchase_phone_number, release_phone_number
+from app.services.twilio_service.client import (
+    purchase_phone_number,
+    release_phone_number,
+    get_existing_phone_number,
+)
 
 
 async def assign_phone_number_to_agent(real_estate_agent_id: str, area_code: Optional[str] = None) -> dict:
@@ -148,3 +152,54 @@ async def get_all_phone_numbers() -> List[dict]:
             }
             for phone in phones
         ]
+
+
+async def assign_existing_phone_number_to_agent(real_estate_agent_id: str, phone_number: str) -> dict:
+    """
+    Assign an existing Twilio phone number (already purchased in the Twilio console)
+    to a real estate agent.
+    """
+    async with AsyncSessionLocal() as session:
+        # Check if agent already has an active phone number
+        stmt = select(PhoneNumber).where(
+            PhoneNumber.real_estate_agent_id == real_estate_agent_id,
+            PhoneNumber.is_active == True,
+        )
+        result = await session.execute(stmt)
+        existing_phone = result.scalar_one_or_none()
+
+        if existing_phone:
+            raise ValueError("Agent already has an active phone number")
+
+        # Ensure this phone number is not already assigned
+        number_stmt = select(PhoneNumber).where(PhoneNumber.twilio_phone_number == phone_number)
+        number_result = await session.execute(number_stmt)
+        existing_number = number_result.scalar_one_or_none()
+        if existing_number:
+            raise ValueError("This phone number is already assigned to an agent")
+
+        # Look up phone number in Twilio to get its SID and normalized number
+        twilio_data = await get_existing_phone_number(phone_number)
+
+        phone_id = str(uuid.uuid4())
+        new_phone = PhoneNumber(
+            id=phone_id,
+            real_estate_agent_id=real_estate_agent_id,
+            twilio_phone_number=twilio_data["phone_number"],
+            twilio_sid=twilio_data["sid"],
+            is_active=True,
+        )
+
+        session.add(new_phone)
+        await session.commit()
+        await session.refresh(new_phone)
+
+        return {
+            "id": phone_id,
+            "real_estate_agent_id": real_estate_agent_id,
+            "twilio_phone_number": new_phone.twilio_phone_number,
+            "twilio_sid": new_phone.twilio_sid,
+            "is_active": new_phone.is_active,
+            "created_at": new_phone.created_at.isoformat() if new_phone.created_at else "",
+            "updated_at": new_phone.updated_at.isoformat() if new_phone.updated_at else "",
+        }

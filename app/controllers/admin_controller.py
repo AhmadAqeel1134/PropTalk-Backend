@@ -263,14 +263,19 @@ class RejectRequest(BaseModel):
     reason: str
 
 
+class ApproveRequest(BaseModel):
+    phone_number: str
+
+
 @router.post("/voice-agent-requests/{request_id}/approve", response_model=dict)
-async def approve_voice_agent_request(
+async def approve_voice_agent_request_endpoint(
     request_id: str,
+    approve_data: ApproveRequest,
     admin_id: str = Depends(get_current_admin_id)
 ):
     """Approve voice agent request (Admin only)"""
     try:
-        result = await approve_voice_agent_request(request_id, admin_id)
+        result = await approve_voice_agent_request(request_id, admin_id, approve_data.phone_number)
         return result
     except ValueError as e:
         raise HTTPException(
@@ -280,7 +285,7 @@ async def approve_voice_agent_request(
 
 
 @router.post("/voice-agent-requests/{request_id}/reject", response_model=dict)
-async def reject_voice_agent_request(
+async def reject_voice_agent_request_endpoint(
     request_id: str,
     reject_data: RejectRequest,
     admin_id: str = Depends(get_current_admin_id)
