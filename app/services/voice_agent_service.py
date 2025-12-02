@@ -337,16 +337,40 @@ def get_default_system_prompt(agent_name: str, company_name: str) -> str:
 
 
 async def get_all_voice_agent_requests(status: Optional[str] = None) -> List[Dict]:
-    """Get all voice agent requests (admin)"""
+    """Get all voice agent requests (admin)
+
+    Returns denormalized data including agent name/email and (if approved)
+    the related voice agent + phone number so the admin UI can clearly
+    distinguish pending vs approved requests.
+    """
     async with AsyncSessionLocal() as session:
+        # Base query: requests + agent relationship
         stmt = select(VoiceAgentRequest).options(selectinload(VoiceAgentRequest.real_estate_agent))
         if status:
             stmt = stmt.where(VoiceAgentRequest.status == status)
         stmt = stmt.order_by(VoiceAgentRequest.created_at.desc())
-        
+
         result = await session.execute(stmt)
         requests = result.scalars().all()
-        
+
+        if not requests:
+            return []
+
+        # Load any existing voice agents (and phone numbers) for the agents in these requests
+        agent_ids = {req.real_estate_agent_id for req in requests}
+        va_stmt = (
+            select(VoiceAgent)
+            .options(selectinload(VoiceAgent.phone_number))
+            .where(VoiceAgent.real_estate_agent_id.in_(agent_ids))
+        )
+        va_result = await session.execute(va_stmt)
+        voice_agents = va_result.scalars().all()
+
+        voice_agent_map = {
+            va.real_estate_agent_id: va
+            for va in voice_agents
+        }
+
         return [
             {
                 "id": req.id,
@@ -358,8 +382,21 @@ async def get_all_voice_agent_requests(status: Optional[str] = None) -> List[Dic
                 "rejection_reason": req.rejection_reason,
                 "created_at": req.created_at.isoformat() if req.created_at else "",
                 "updated_at": req.updated_at.isoformat() if req.updated_at else "",
+                # Denormalized agent info
                 "agent_name": req.real_estate_agent.full_name if req.real_estate_agent else None,
                 "agent_email": req.real_estate_agent.email if req.real_estate_agent else None,
+                # Related voice agent / phone info (may be None for pending/rejected)
+                "voice_agent_id": (
+                    voice_agent_map.get(req.real_estate_agent_id).id
+                    if voice_agent_map.get(req.real_estate_agent_id)
+                    else None
+                ),
+                "voice_agent_phone_number": (
+                    voice_agent_map.get(req.real_estate_agent_id).phone_number.twilio_phone_number
+                    if voice_agent_map.get(req.real_estate_agent_id)
+                    and voice_agent_map.get(req.real_estate_agent_id).phone_number
+                    else None
+                ),
             }
             for req in requests
         ]

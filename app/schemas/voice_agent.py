@@ -14,6 +14,12 @@ class VoiceAgentRequestResponse(BaseModel):
     rejection_reason: Optional[str] = None
     created_at: str
     updated_at: str
+    # Denormalized agent info for admin UI
+    agent_name: Optional[str] = None
+    agent_email: Optional[str] = None
+    # Related voice agent / phone info (if already approved)
+    voice_agent_id: Optional[str] = None
+    voice_agent_phone_number: Optional[str] = None
 
     class Config:
         from_attributes = True
