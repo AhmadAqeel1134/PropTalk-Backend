@@ -1,7 +1,8 @@
 """
 Call Controller - API endpoints for call management
 """
-from fastapi import APIRouter, HTTPException, Depends, status, Query
+import logging
+from fastapi import APIRouter, HTTPException, Depends, status, Query, Request
 from typing import Optional
 from app.schemas.call import (
     CallResponse,
@@ -21,6 +22,7 @@ from app.services.call_service import (
 from app.services.call_statistics_service import get_call_statistics
 from app.utils.dependencies import get_current_real_estate_agent_id, get_current_admin_id
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/agent/calls", tags=["Calls"])
 
 
@@ -28,20 +30,73 @@ router = APIRouter(prefix="/agent/calls", tags=["Calls"])
 @router.post("/initiate", response_model=dict, status_code=status.HTTP_201_CREATED)
 async def initiate_call_endpoint(
     request: CallInitiateRequest,
-    agent_id: str = Depends(get_current_real_estate_agent_id)
+    agent_id: str = Depends(get_current_real_estate_agent_id),
+    http_request: Request = None
 ):
     """Initiate an outbound call"""
+    # Log incoming request from frontend
+    client_ip = http_request.client.host if http_request and http_request.client else "unknown"
+    print("\n" + "="*70)
+    print("📞 OUTBOUND CALL REQUEST RECEIVED FROM FRONTEND")
+    print("="*70)
+    print(f"👤 Agent ID: {agent_id}")
+    print(f"📱 Phone Number: {request.phone_number}")
+    print(f"📇 Contact ID: {request.contact_id or 'None'}")
+    print(f"🌐 Client IP: {client_ip}")
+    print(f"📋 Request Data: {request.model_dump()}")
+    print("="*70 + "\n")
+    
+    logger.info(f"📞 Outbound call request - Agent: {agent_id}, Phone: {request.phone_number}, Contact: {request.contact_id}")
+    
     try:
+        print("🔄 Processing call initiation...")
         result = await initiate_call(
             real_estate_agent_id=agent_id,
             contact_id=request.contact_id,
             phone_number=request.phone_number
         )
+        
+        print("\n" + "="*70)
+        print("✅ CALL INITIATED SUCCESSFULLY")
+        print("="*70)
+        print(f"📞 Call ID: {result.get('id', 'N/A')}")
+        print(f"🔢 Twilio Call SID: {result.get('twilio_call_sid', 'N/A')}")
+        print(f"📱 From: {result.get('from_number', 'N/A')}")
+        print(f"📱 To: {result.get('to_number', 'N/A')}")
+        print(f"📊 Status: {result.get('status', 'N/A')}")
+        print("="*70 + "\n")
+        
+        logger.info(f"✅ Call initiated successfully - Call SID: {result.get('twilio_call_sid')}, To: {result.get('to_number')}")
+        
         return result
     except ValueError as e:
+        error_msg = str(e)
+        print("\n" + "="*70)
+        print("❌ CALL INITIATION FAILED")
+        print("="*70)
+        print(f"⚠️ Error: {error_msg}")
+        print("="*70 + "\n")
+        
+        logger.error(f"❌ Call initiation failed - Agent: {agent_id}, Phone: {request.phone_number}, Error: {error_msg}")
+        
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
+            detail=error_msg
+        )
+    except Exception as e:
+        error_msg = str(e)
+        print("\n" + "="*70)
+        print("❌ UNEXPECTED ERROR IN CALL INITIATION")
+        print("="*70)
+        print(f"⚠️ Error: {error_msg}")
+        print(f"⚠️ Error Type: {type(e).__name__}")
+        print("="*70 + "\n")
+        
+        logger.error(f"❌ Unexpected error in call initiation - Agent: {agent_id}, Error: {error_msg}", exc_info=True)
+        
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {error_msg}"
         )
 
 

@@ -2,6 +2,7 @@
 Call Service - Business logic for call management
 Handles call initiation, recording, and history
 """
+import logging
 from typing import Optional, Dict, List, Tuple
 from datetime import datetime
 import uuid
@@ -14,6 +15,8 @@ from app.models.contact import Contact
 from app.services.twilio_service.client import get_twilio_client
 from app.config import settings
 
+logger = logging.getLogger(__name__)
+
 
 async def initiate_call(
     real_estate_agent_id: str,
@@ -21,6 +24,9 @@ async def initiate_call(
     phone_number: str
 ) -> Dict:
     """Initiate an outbound call via Twilio"""
+    print(f"🔍 Looking up voice agent for agent ID: {real_estate_agent_id}")
+    logger.info(f"Initiating call - Agent: {real_estate_agent_id}, To: {phone_number}, Contact: {contact_id}")
+    
     async with AsyncSessionLocal() as session:
         # Get voice agent
         stmt = (
@@ -37,10 +43,20 @@ async def initiate_call(
         voice_agent = result.scalar_one_or_none()
         
         if not voice_agent:
+            print("❌ No active voice agent found")
+            logger.error(f"No active voice agent found for agent: {real_estate_agent_id}")
             raise ValueError("Active voice agent not found")
         
+        print(f"✅ Voice agent found: {voice_agent.name} (ID: {voice_agent.id})")
+        logger.info(f"Voice agent found: {voice_agent.id}")
+        
         if not voice_agent.phone_number:
+            print("❌ Voice agent has no phone number assigned")
+            logger.error(f"Voice agent {voice_agent.id} has no phone number assigned")
             raise ValueError("Voice agent does not have a phone number assigned")
+        
+        print(f"📞 Voice agent phone number: {voice_agent.phone_number.twilio_phone_number}")
+        logger.info(f"Voice agent phone: {voice_agent.phone_number.twilio_phone_number}")
         
         # Get contact if provided
         contact = None
@@ -53,13 +69,63 @@ async def initiate_call(
             )
             contact_result = await session.execute(contact_stmt)
             contact = contact_result.scalar_one_or_none()
+            
+            if contact:
+                # Use contact's phone number if contact is provided
+                phone_number = contact.phone_number
+                print(f"📇 Using contact phone number: {phone_number}")
+                logger.info(f"Using contact phone number: {phone_number}")
         
         # Normalize phone number (ensure E.164 format)
-        if not phone_number.startswith("+"):
-            phone_number = "+" + phone_number.lstrip("+")
+        original_phone = phone_number
+        
+        # Remove all non-digit characters except +
+        cleaned = ''.join(c for c in phone_number if c.isdigit() or c == '+')
+        
+        # Ensure it starts with +
+        if not cleaned.startswith("+"):
+            # If starts with country code 92, add +
+            if cleaned.startswith("92"):
+                cleaned = "+" + cleaned
+            # If starts with 0 (Pakistan local format), replace with +92
+            elif cleaned.startswith("0"):
+                cleaned = "+92" + cleaned[1:]
+            # Otherwise, assume Pakistan and add +92
+            else:
+                cleaned = "+92" + cleaned
+        else:
+            # Already has +, but check for double country code
+            # If it's +92 followed by 92 again, remove the duplicate
+            if cleaned.startswith("+9292"):
+                cleaned = "+92" + cleaned[5:]
+        
+        phone_number = cleaned
+        
+        if phone_number != original_phone:
+            print(f"📝 Normalized phone number: {original_phone} → {phone_number}")
+            logger.info(f"Normalized phone number: {original_phone} → {phone_number}")
+        
+        # Validate phone number format (basic check)
+        # E.164 format: + followed by 1-15 digits
+        if not phone_number.startswith("+") or len(phone_number) < 8 or len(phone_number) > 16:
+            error_msg = f"Invalid phone number format: {phone_number}. Expected E.164 format (e.g., +923001234567 or +1234567890)"
+            print(f"❌ {error_msg}")
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        # Check for digits after +
+        digits_after_plus = phone_number[1:]
+        if not digits_after_plus.isdigit():
+            error_msg = f"Invalid phone number format: {phone_number}. Phone number should contain only digits after the + sign"
+            print(f"❌ {error_msg}")
+            logger.error(error_msg)
+            raise ValueError(error_msg)
         
         # Create call record
         call_id = str(uuid.uuid4())
+        print(f"📝 Creating call record - Call ID: {call_id}")
+        logger.info(f"Creating call record - ID: {call_id}, To: {phone_number}")
+        
         new_call = Call(
             id=call_id,
             voice_agent_id=voice_agent.id,
@@ -77,18 +143,29 @@ async def initiate_call(
         
         session.add(new_call)
         await session.commit()
+        print(f"✅ Call record created in database")
+        logger.info(f"Call record created - ID: {call_id}")
         
         # Make call via Twilio
         try:
+            print(f"🔌 Connecting to Twilio API...")
             client = get_twilio_client()
+            
             # Get webhook URL from settings
             base_url = settings.TWILIO_VOICE_WEBHOOK_URL
             if not base_url:
+                print("❌ TWILIO_VOICE_WEBHOOK_URL not configured")
+                logger.error("TWILIO_VOICE_WEBHOOK_URL not configured in environment")
                 raise ValueError("TWILIO_VOICE_WEBHOOK_URL not configured in environment")
             
             voice_url = f"{base_url}/webhooks/twilio/voice"
-            
             recording_callback = f"{base_url}/webhooks/twilio/recording"
+            
+            print(f"📞 Calling Twilio API to initiate call...")
+            print(f"   From: {voice_agent.phone_number.twilio_phone_number}")
+            print(f"   To: {phone_number}")
+            print(f"   Webhook URL: {voice_url}")
+            logger.info(f"Calling Twilio API - From: {voice_agent.phone_number.twilio_phone_number}, To: {phone_number}, Webhook: {voice_url}")
             
             call = client.calls.create(
                 to=phone_number,
@@ -102,23 +179,37 @@ async def initiate_call(
                 status_callback_method="POST"
             )
             
+            print(f"✅ Twilio call created successfully!")
+            print(f"   Twilio Call SID: {call.sid}")
+            print(f"   Call Status: {call.status}")
+            logger.info(f"Twilio call created - SID: {call.sid}, Status: {call.status}")
+            
             # Update call with Twilio SID
             new_call.twilio_call_sid = call.sid
             await session.commit()
             await session.refresh(new_call)
+            print(f"✅ Call record updated with Twilio SID")
             
-            return {
+            result = {
                 "id": new_call.id,
                 "twilio_call_sid": call.sid,
                 "status": "initiated",
                 "to_number": phone_number,
                 "from_number": voice_agent.phone_number.twilio_phone_number,
             }
+            
+            return result
         except Exception as e:
+            error_msg = str(e)
+            print(f"\n❌ ERROR: Failed to initiate Twilio call")
+            print(f"   Error: {error_msg}")
+            print(f"   Error Type: {type(e).__name__}\n")
+            logger.error(f"Failed to initiate Twilio call - Error: {error_msg}", exc_info=True)
+            
             # Update call status to failed
             new_call.status = "failed"
             await session.commit()
-            raise ValueError(f"Failed to initiate call: {str(e)}")
+            raise ValueError(f"Failed to initiate call: {error_msg}")
 
 
 async def initiate_batch_calls(
@@ -127,8 +218,17 @@ async def initiate_batch_calls(
     delay_seconds: int = 30
 ) -> Dict:
     """Initiate batch calls with delay between each"""
+    import asyncio
+    
     calls = []
     errors = []
+    
+    # Minimum delay of 3 seconds to prevent webhook conflicts and timeouts
+    # This ensures webhooks have time to process before next call
+    # Webhooks need ~2-3 seconds to process, so we need at least that much delay
+    actual_delay = max(delay_seconds, 3) if delay_seconds >= 0 else 3
+    if delay_seconds < 3:
+        print(f"⚠️ Delay of {delay_seconds}s is too short. Using minimum 3s delay to prevent webhook conflicts.")
     
     for i, contact_id in enumerate(contact_ids):
         try:
@@ -156,10 +256,12 @@ async def initiate_batch_calls(
                 calls.append(call_data)
                 
                 # Delay before next call (except for last one)
+                # Use actual_delay to ensure minimum 2 seconds between calls
                 if i < len(contact_ids) - 1:
-                    import asyncio
-                    await asyncio.sleep(delay_seconds)
+                    print(f"⏱️ Waiting {actual_delay} seconds before next call...")
+                    await asyncio.sleep(actual_delay)
         except Exception as e:
+            logger.error(f"Error initiating call for contact {contact_id}: {str(e)}", exc_info=True)
             errors.append({"contact_id": contact_id, "error": str(e)})
     
     return {
