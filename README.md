@@ -118,3 +118,5 @@ Once running, visit:
 - Swagger UI: http://localhost:8000/docs
 - ReDoc: http://localhost:8000/redoc
 
+## Ngrok tunnel activation
+& "D:\Ngrok\ngrok-v3-stable-windows-amd64\ngrok.exe" http 8000
