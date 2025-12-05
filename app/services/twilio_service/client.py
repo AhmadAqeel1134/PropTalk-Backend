@@ -1,3 +1,7 @@
+"""
+Twilio Client Service - Twilio client management and phone number operations
+Low-level Twilio API interactions
+"""
 from twilio.rest import Client
 from app.config import settings
 from typing import Optional, Dict
@@ -9,7 +13,7 @@ twilio_client: Optional[Client] = None
 
 
 def get_twilio_client() -> Client:
-    """Get or create Twilio client"""
+    """Get or create Twilio client singleton"""
     global twilio_client
     if twilio_client is None:
         if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN:
@@ -51,6 +55,35 @@ async def purchase_phone_number(area_code: Optional[str] = None) -> Dict[str, st
     import asyncio
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, purchase_phone_number_sync, area_code)
+
+
+def get_existing_phone_number_sync(phone_number: str) -> Dict[str, str]:
+    """
+    Look up an existing Twilio incoming phone number by phone number.
+    Returns: {"phone_number": "+1234567890", "sid": "PN..."}
+    """
+    try:
+        client = get_twilio_client()
+        # Twilio normalizes phone numbers to E.164, so we rely on exact match
+        incoming_numbers = client.incoming_phone_numbers.list(phone_number=phone_number, limit=1)
+        if not incoming_numbers:
+            raise ValueError("Phone number not found in Twilio account")
+
+        number = incoming_numbers[0]
+        return {
+            "phone_number": number.phone_number,
+            "sid": number.sid,
+        }
+    except Exception as e:
+        logger.error(f"Error looking up existing phone number: {str(e)}")
+        raise ValueError(f"Failed to find existing phone number: {str(e)}")
+
+
+async def get_existing_phone_number(phone_number: str) -> Dict[str, str]:
+    """Async wrapper for looking up an existing Twilio phone number"""
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, get_existing_phone_number_sync, phone_number)
 
 
 def release_phone_number_sync(twilio_sid: str) -> bool:

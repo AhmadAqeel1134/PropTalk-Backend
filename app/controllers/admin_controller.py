@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, Query
 from typing import List, Optional
 from app.schemas.real_estate_agent import RealEstateAgentResponse, RealEstateAgentUpdateRequest
 from app.schemas.admin_dashboard import AdminDashboardResponse
@@ -21,6 +21,21 @@ from app.services.admin_service import (
     get_agent_contacts_for_admin,
     get_agent_phone_number_for_admin
 )
+from app.services.voice_agent_service import (
+    get_all_voice_agent_requests,
+    get_all_voice_agents,
+    approve_voice_agent_request,
+    reject_voice_agent_request,
+    get_voice_agent
+)
+from app.schemas.voice_agent import (
+    VoiceAgentRequestListResponse,
+    VoiceAgentListResponse,
+    VoiceAgentResponse
+)
+from app.schemas.call import CallStatisticsResponse
+from app.services.call_statistics_service import get_call_statistics
+from pydantic import BaseModel
 from app.utils.dependencies import get_current_admin_id
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -233,6 +248,83 @@ async def get_agent_contacts(
     return contacts
 
 
+# Voice Agent Management (Admin)
+@router.get("/voice-agent-requests", response_model=VoiceAgentRequestListResponse)
+async def get_voice_agent_requests_endpoint(
+    status: Optional[str] = None,
+    admin_id: str = Depends(get_current_admin_id)
+):
+    """Get all voice agent requests (Admin only)"""
+    requests = await get_all_voice_agent_requests(status)
+    return VoiceAgentRequestListResponse(items=requests, total=len(requests))
+
+
+class RejectRequest(BaseModel):
+    reason: str
+
+
+class ApproveRequest(BaseModel):
+    phone_number: str
+
+
+@router.post("/voice-agent-requests/{request_id}/approve", response_model=dict)
+async def approve_voice_agent_request_endpoint(
+    request_id: str,
+    approve_data: ApproveRequest,
+    admin_id: str = Depends(get_current_admin_id)
+):
+    """Approve voice agent request (Admin only)"""
+    try:
+        result = await approve_voice_agent_request(request_id, admin_id, approve_data.phone_number)
+        return result
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+
+@router.post("/voice-agent-requests/{request_id}/reject", response_model=dict)
+async def reject_voice_agent_request_endpoint(
+    request_id: str,
+    reject_data: RejectRequest,
+    admin_id: str = Depends(get_current_admin_id)
+):
+    """Reject voice agent request (Admin only)"""
+    try:
+        result = await reject_voice_agent_request(request_id, admin_id, reject_data.reason)
+        return result
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+
+@router.get("/voice-agents", response_model=VoiceAgentListResponse)
+async def get_all_voice_agents(
+    admin_id: str = Depends(get_current_admin_id)
+):
+    """Get all voice agents (Admin only)"""
+    voice_agents = await get_all_voice_agents()
+    return VoiceAgentListResponse(items=voice_agents, total=len(voice_agents))
+
+
+@router.get("/voice-agents/{agent_id}", response_model=VoiceAgentResponse)
+async def get_voice_agent_by_agent_id(
+    agent_id: str,
+    admin_id: str = Depends(get_current_admin_id)
+):
+    """Get voice agent for a specific agent (Admin only)"""
+    voice_agent = await get_voice_agent(agent_id)
+    if not voice_agent:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Voice agent not found"
+        )
+    return VoiceAgentResponse(**voice_agent)
+
+
 @router.get("/real-estate-agents/{agent_id}/phone-number", response_model=PhoneNumberResponse)
 async def get_agent_phone_number(
     agent_id: str,
@@ -249,3 +341,20 @@ async def get_agent_phone_number(
     
     return PhoneNumberResponse(**phone_number)
 
+
+# Call Statistics (Admin)
+@router.get("/voice-agents/{agent_id}/call-stats", response_model=CallStatisticsResponse)
+async def get_call_statistics_endpoint(
+    agent_id: str,
+    period: str = Query("week", pattern="^(day|week|month)$"),
+    admin_id: str = Depends(get_current_admin_id)
+):
+    """Get call statistics for an agent (Admin only)"""
+    try:
+        stats = await get_call_statistics(agent_id, period)
+        return CallStatisticsResponse(**stats)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
