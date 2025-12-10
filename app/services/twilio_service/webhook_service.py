@@ -553,242 +553,242 @@ async def handle_voice_webhook(form_data: Dict) -> str:
                 if not voice_agent_name:
                     logger.error("❌ voice_agent_name is None in initial greeting!")
                     return _generate_error_twiml("The voice agent is not available.")
-            
-            if is_outbound:
-                # For outbound: Quick lookup for contact name and agent info
-                # Strategy: Try Contact table first, then Property.owner_phone as fallback
-                contact_name = None
-                agent_name = None
-                company_name = None
-                property_address = None
-                contact_phone = None
                 
-                # Try quick lookup (with timeout to avoid blocking)
-                try:
-                    async with AsyncSessionLocal() as session:
-                        from app.models.contact import Contact
-                        from app.models.real_estate_agent import RealEstateAgent
-                        from app.models.property import Property
-                        from app.models.call import Call
+                if is_outbound:
+                    # For outbound: Quick lookup for contact name and agent info
+                    # Strategy: Try Contact table first, then Property.owner_phone as fallback
+                    contact_name = None
+                    agent_name = None
+                    company_name = None
+                    property_address = None
+                    contact_phone = None
+                    
+                    # Try quick lookup (with timeout to avoid blocking)
+                    try:
+                        async with AsyncSessionLocal() as session:
+                            from app.models.contact import Contact
+                            from app.models.real_estate_agent import RealEstateAgent
+                            from app.models.property import Property
+                            from app.models.call import Call
 
-                        # 0) Prefer pulling the call record to get contact_id → contact name/phone
-                        try:
-                            call_lookup = (
-                                await session.execute(
-                                    select(Call)
-                                    .options(selectinload(Call.contact))
-                                    .where(Call.twilio_call_sid == call_sid)
+                            # 0) Prefer pulling the call record to get contact_id → contact name/phone
+                            try:
+                                call_lookup = (
+                                    await session.execute(
+                                        select(Call)
+                                        .options(selectinload(Call.contact))
+                                        .where(Call.twilio_call_sid == call_sid)
+                                        .limit(1)
+                                    )
+                                ).scalar_one_or_none()
+
+                                if call_lookup and call_lookup.contact:
+                                    contact_name = call_lookup.contact.name
+                                    contact_phone = call_lookup.contact.phone_number
+                                    logger.info(f"✅ Found contact via Call record: {contact_name}")
+                            except Exception as call_lookup_error:
+                                logger.warning(f"⚠️ Call record lookup failed: {call_lookup_error}")
+                            
+                            # Normalize to_number for lookup (for outbound, to_number is the contact)
+                            normalized_to = to_number.strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+                            if not normalized_to.startswith("+"):
+                                normalized_to = "+" + normalized_to
+                            
+                            logger.info(f"🔍 Looking up contact for phone: {normalized_to}, agent_id: {real_estate_agent_id}")
+                            
+                            # METHOD 1: Try Contact table by phone_number (skip if already found via call record)
+                            if not contact_name:
+                                # Normalize phone for matching (exact and last-10 fallback)
+                                last10 = normalized_to[-10:] if len(normalized_to) > 10 else normalized_to
+                                contact_stmt = (
+                                    select(Contact)
+                                    .where(
+                                        Contact.real_estate_agent_id == real_estate_agent_id,
+                                        or_(
+                                            Contact.phone_number == normalized_to,
+                                            Contact.phone_number.like(f"%{last10}%")
+                                        )
+                                    )
                                     .limit(1)
                                 )
-                            ).scalar_one_or_none()
-
-                            if call_lookup and call_lookup.contact:
-                                contact_name = call_lookup.contact.name
-                                contact_phone = call_lookup.contact.phone_number
-                                logger.info(f"✅ Found contact via Call record: {contact_name}")
-                        except Exception as call_lookup_error:
-                            logger.warning(f"⚠️ Call record lookup failed: {call_lookup_error}")
-                        
-                        # Normalize to_number for lookup (for outbound, to_number is the contact)
-                        normalized_to = to_number.strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
-                        if not normalized_to.startswith("+"):
-                            normalized_to = "+" + normalized_to
-                        
-                        logger.info(f"🔍 Looking up contact for phone: {normalized_to}, agent_id: {real_estate_agent_id}")
-                        
-                        # METHOD 1: Try Contact table by phone_number (skip if already found via call record)
-                        if not contact_name:
-                            # Normalize phone for matching (exact and last-10 fallback)
-                            last10 = normalized_to[-10:] if len(normalized_to) > 10 else normalized_to
-                            contact_stmt = (
-                                select(Contact)
-                                .where(
-                                    Contact.real_estate_agent_id == real_estate_agent_id,
-                                    or_(
-                                        Contact.phone_number == normalized_to,
-                                        Contact.phone_number.like(f"%{last10}%")
-                                    )
-                                )
-                                .limit(1)
-                            )
-                            contact_result = await session.execute(contact_stmt)
-                            contact = contact_result.scalar_one_or_none()
-                            
-                            if contact:
-                                contact_name = contact.name
-                                contact_phone = contact.phone_number
-                                logger.info(f"✅ Found contact via Contact table: {contact_name}")
+                                contact_result = await session.execute(contact_stmt)
+                                contact = contact_result.scalar_one_or_none()
                                 
-                                # Get first property for this contact (for context)
+                                if contact:
+                                    contact_name = contact.name
+                                    contact_phone = contact.phone_number
+                                    logger.info(f"✅ Found contact via Contact table: {contact_name}")
+                                    
+                                    # Get first property for this contact (for context)
+                                    property_stmt = select(Property).where(
+                                        Property.contact_id == contact.id
+                                    ).limit(1)
+                                    property_result = await session.execute(property_stmt)
+                                    property_obj = property_result.scalar_one_or_none()
+                                    
+                                    if property_obj:
+                                        property_address = property_obj.address
+                                        logger.info(f"✅ Found property: {property_address}")
+                            
+                            if not contact_name:
+                                # METHOD 2: Try Property table by owner_phone, then get contact
+                                logger.info(f"⚠️ Contact not found in Contact table, trying Property.owner_phone...")
                                 property_stmt = select(Property).where(
-                                    Property.contact_id == contact.id
+                                    Property.owner_phone == normalized_to,
+                                    Property.real_estate_agent_id == real_estate_agent_id
                                 ).limit(1)
                                 property_result = await session.execute(property_stmt)
                                 property_obj = property_result.scalar_one_or_none()
                                 
                                 if property_obj:
                                     property_address = property_obj.address
-                                    logger.info(f"✅ Found property: {property_address}")
-                        
-                        if not contact_name:
-                            # METHOD 2: Try Property table by owner_phone, then get contact
-                            logger.info(f"⚠️ Contact not found in Contact table, trying Property.owner_phone...")
-                            property_stmt = select(Property).where(
-                                Property.owner_phone == normalized_to,
-                                Property.real_estate_agent_id == real_estate_agent_id
-                            ).limit(1)
-                            property_result = await session.execute(property_stmt)
-                            property_obj = property_result.scalar_one_or_none()
-                            
-                            if property_obj:
-                                property_address = property_obj.address
-                                logger.info(f"✅ Found property via owner_phone: {property_address}")
-                                
-                                # Try to get contact from property.contact_id
-                                if property_obj.contact_id:
-                                    contact_stmt = select(Contact).where(
-                                        Contact.id == property_obj.contact_id
-                                    ).limit(1)
-                                    contact_result = await session.execute(contact_stmt)
-                                    contact = contact_result.scalar_one_or_none()
+                                    logger.info(f"✅ Found property via owner_phone: {property_address}")
                                     
-                                    if contact:
-                                        contact_name = contact.name
-                                        logger.info(f"✅ Found contact via property.contact_id: {contact_name}")
+                                    # Try to get contact from property.contact_id
+                                    if property_obj.contact_id:
+                                        contact_stmt = select(Contact).where(
+                                            Contact.id == property_obj.contact_id
+                                        ).limit(1)
+                                        contact_result = await session.execute(contact_stmt)
+                                        contact = contact_result.scalar_one_or_none()
+                                        
+                                        if contact:
+                                            contact_name = contact.name
+                                            logger.info(f"✅ Found contact via property.contact_id: {contact_name}")
+                                        else:
+                                            # Use owner_name from property as fallback
+                                            contact_name = property_obj.owner_name
+                                            logger.info(f"⚠️ Using property.owner_name as fallback: {contact_name}")
                                     else:
-                                        # Use owner_name from property as fallback
+                                        # Use owner_name from property
                                         contact_name = property_obj.owner_name
-                                        logger.info(f"⚠️ Using property.owner_name as fallback: {contact_name}")
-                                else:
-                                    # Use owner_name from property
-                                    contact_name = property_obj.owner_name
-                                    logger.info(f"⚠️ Using property.owner_name: {contact_name}")
-                        
-                        # Quick agent lookup
-                        if real_estate_agent_id:
-                            agent_stmt = select(RealEstateAgent).where(
-                                RealEstateAgent.id == real_estate_agent_id
-                            ).limit(1)
-                            agent_result = await session.execute(agent_stmt)
-                            agent = agent_result.scalar_one_or_none()
+                                        logger.info(f"⚠️ Using property.owner_name: {contact_name}")
                             
-                            if agent:
-                                agent_name = agent.full_name
-                                company_name = agent.company_name or "Independent Agent"
-                                logger.info(f"✅ Found agent: {agent_name} from {company_name}")
-                except Exception as lookup_error:
-                    logger.warning(f"⚠️ Quick lookup failed (non-critical): {lookup_error}", exc_info=True)
-                    # Continue with LLM greeting using available info
-                
-                # Generate greeting using LLM with proper context
-                try:
-                    from app.services.ai.prompt_service import get_initial_greeting_prompt
-                    from app.services.ai.llm_service import generate_initial_greeting
+                            # Quick agent lookup
+                            if real_estate_agent_id:
+                                agent_stmt = select(RealEstateAgent).where(
+                                    RealEstateAgent.id == real_estate_agent_id
+                                ).limit(1)
+                                agent_result = await session.execute(agent_stmt)
+                                agent = agent_result.scalar_one_or_none()
+                                
+                                if agent:
+                                    agent_name = agent.full_name
+                                    company_name = agent.company_name or "Independent Agent"
+                                    logger.info(f"✅ Found agent: {agent_name} from {company_name}")
+                    except Exception as lookup_error:
+                        logger.warning(f"⚠️ Quick lookup failed (non-critical): {lookup_error}", exc_info=True)
+                        # Continue with LLM greeting using available info
                     
-                    # Build context for greeting prompt
-                    # CRITICAL: Always include contact name if available, even if empty dict
-                    greeting_context = {
-                        "voice_agent": {"name": voice_agent_name},
-                        "real_estate_agent": {
-                            "name": agent_name or "Real Estate Agent",
-                            "company_name": company_name or "Independent Agent"
-                        },
-                        "contact": {"name": contact_name} if contact_name else {},  # Only include if we have name
-                        "properties": [{"address": property_address}] if property_address else []
-                    }
-                    
-                    # Log context for debugging
-                    logger.info(f"📋 Greeting context - Contact: '{contact_name}' (type: {type(contact_name)}), Agent: {agent_name}, Company: {company_name}, Property: {property_address}")
-                    
-                    # CRITICAL: Verify contact_name is not None/empty before passing
-                    if not contact_name or not contact_name.strip():
-                        logger.warning(f"⚠️ Contact name is missing or empty! Contact lookup may have failed.")
-                        logger.warning(f"⚠️ to_number: {to_number}, normalized_to: {normalized_to if 'normalized_to' in locals() else 'N/A'}, real_estate_agent_id: {real_estate_agent_id}")
-                    
-                    # Get greeting prompt with context
-                    greeting_prompt = get_initial_greeting_prompt(greeting_context, "outbound")
-                    
-                    # Generate greeting with LLM (with short timeout to stay under 3s total)
-                    logger.info(f"🤖 Generating greeting with LLM...")
-                    greeting = await asyncio.wait_for(
-                        generate_initial_greeting(greeting_prompt, timeout=2.0),
-                        timeout=2.5
-                    )
-                    logger.info(f"✅ LLM generated greeting: {greeting[:50]}...")
-                    
-                except asyncio.TimeoutError:
-                    logger.warning("⏱️ LLM greeting timeout, using fallback")
-                    # Fallback greeting (force personalization when we have the name)
-                    if contact_name:
-                        if agent_name and company_name:
-                            greeting = (
-                                f"Hello, this is {voice_agent_name} from {company_name}. "
-                                f"I'm calling on behalf of {agent_name}. Am I contacting {contact_name}?"
-                            )
-                        else:
-                            greeting = (
-                                f"Hello, this is {voice_agent_name}. Am I contacting {contact_name}? "
-                                f"I'm calling about your property{f' at {property_address}' if property_address else ''}."
-                            )
-                    else:
-                        greeting = (
-                            f"Hello, this is {voice_agent_name}. "
-                            f"Am I speaking with the property owner? I'm calling about your property."
-                        )
+                    # Generate greeting using LLM with proper context
+                    try:
+                        from app.services.ai.prompt_service import get_initial_greeting_prompt
+                        from app.services.ai.llm_service import generate_initial_greeting
                         
-                except Exception as llm_error:
-                    logger.warning(f"⚠️ LLM greeting error: {llm_error}, using fallback")
-                    # Fallback greeting (force personalization when we have the name)
-                    if contact_name:
-                        if agent_name and company_name:
-                            greeting = (
-                                f"Hello, this is {voice_agent_name} from {company_name}. "
-                                f"I'm calling on behalf of {agent_name}. Am I contacting {contact_name}?"
-                            )
+                        # Build context for greeting prompt
+                        # CRITICAL: Always include contact name if available, even if empty dict
+                        greeting_context = {
+                            "voice_agent": {"name": voice_agent_name},
+                            "real_estate_agent": {
+                                "name": agent_name or "Real Estate Agent",
+                                "company_name": company_name or "Independent Agent"
+                            },
+                            "contact": {"name": contact_name} if contact_name else {},  # Only include if we have name
+                            "properties": [{"address": property_address}] if property_address else []
+                        }
+                        
+                        # Log context for debugging
+                        logger.info(f"📋 Greeting context - Contact: '{contact_name}' (type: {type(contact_name)}), Agent: {agent_name}, Company: {company_name}, Property: {property_address}")
+                        
+                        # CRITICAL: Verify contact_name is not None/empty before passing
+                        if not contact_name or not contact_name.strip():
+                            logger.warning(f"⚠️ Contact name is missing or empty! Contact lookup may have failed.")
+                            logger.warning(f"⚠️ to_number: {to_number}, normalized_to: {normalized_to if 'normalized_to' in locals() else 'N/A'}, real_estate_agent_id: {real_estate_agent_id}")
+                        
+                        # Get greeting prompt with context
+                        greeting_prompt = get_initial_greeting_prompt(greeting_context, "outbound")
+                        
+                        # Generate greeting with LLM (with short timeout to stay under 3s total)
+                        logger.info(f"🤖 Generating greeting with LLM...")
+                        greeting = await asyncio.wait_for(
+                            generate_initial_greeting(greeting_prompt, timeout=2.0),
+                            timeout=2.5
+                        )
+                        logger.info(f"✅ LLM generated greeting: {greeting[:50]}...")
+                        
+                    except asyncio.TimeoutError:
+                        logger.warning("⏱️ LLM greeting timeout, using fallback")
+                        # Fallback greeting (force personalization when we have the name)
+                        if contact_name:
+                            if agent_name and company_name:
+                                greeting = (
+                                    f"Hello, this is {voice_agent_name} from {company_name}. "
+                                    f"I'm calling on behalf of {agent_name}. Am I contacting {contact_name}?"
+                                )
+                            else:
+                                greeting = (
+                                    f"Hello, this is {voice_agent_name}. Am I contacting {contact_name}? "
+                                    f"I'm calling about your property{f' at {property_address}' if property_address else ''}."
+                                )
                         else:
                             greeting = (
-                                f"Hello, this is {voice_agent_name}. Am I contacting {contact_name}? "
-                                f"I'm calling about your property{f' at {property_address}' if property_address else ''}."
+                                f"Hello, this is {voice_agent_name}. "
+                                f"Am I speaking with the property owner? I'm calling about your property."
                             )
-                    else:
-                        greeting = (
-                            f"Hello, this is {voice_agent_name}. "
-                            f"Am I speaking with the property owner? I'm calling about your property."
+                            
+                    except Exception as llm_error:
+                        logger.warning(f"⚠️ LLM greeting error: {llm_error}, using fallback")
+                        # Fallback greeting (force personalization when we have the name)
+                        if contact_name:
+                            if agent_name and company_name:
+                                greeting = (
+                                    f"Hello, this is {voice_agent_name} from {company_name}. "
+                                    f"I'm calling on behalf of {agent_name}. Am I contacting {contact_name}?"
+                                )
+                            else:
+                                greeting = (
+                                    f"Hello, this is {voice_agent_name}. Am I contacting {contact_name}? "
+                                    f"I'm calling about your property{f' at {property_address}' if property_address else ''}."
+                                )
+                        else:
+                            greeting = (
+                                f"Hello, this is {voice_agent_name}. "
+                                f"Am I speaking with the property owner? I'm calling about your property."
+                            )
+                else:
+                    # Inbound call greeting
+                    greeting = f"Hello, this is {voice_agent_name}. Thank you for calling. How can I help you?"
+                
+                # Create conversation state (only if we have valid IDs)
+                conversation_state = None
+                if voice_agent_id and real_estate_agent_id:
+                    try:
+                        conversation_state = create_conversation_state(
+                            call_sid=call_sid,
+                            direction="outbound" if is_outbound else "inbound",
+                            context={},
+                            voice_agent_id=voice_agent_id,
+                            real_estate_agent_id=real_estate_agent_id,
+                            contact_id=None
                         )
-            else:
-                # Inbound call greeting
-                greeting = f"Hello, this is {voice_agent_name}. Thank you for calling. How can I help you?"
-            
-            # Create conversation state (only if we have valid IDs)
-            conversation_state = None
-            if voice_agent_id and real_estate_agent_id:
-                try:
-                    conversation_state = create_conversation_state(
-                        call_sid=call_sid,
-                        direction="outbound" if is_outbound else "inbound",
-                        context={},
-                        voice_agent_id=voice_agent_id,
-                        real_estate_agent_id=real_estate_agent_id,
-                        contact_id=None
-                    )
-                    logger.info(f"✅ Conversation state created for call {call_sid}")
-                except Exception as state_error:
-                    logger.error(f"❌ Failed to create conversation state: {state_error}", exc_info=True)
-                    print(f"❌ State creation error: {state_error}")
-                    # Continue anyway - state creation is not critical for initial greeting
-            else:
-                logger.warning(f"⚠️ Skipping conversation state creation - missing IDs: voice_agent_id={voice_agent_id}, real_estate_agent_id={real_estate_agent_id}")
-            
-            # Update conversation history (only if state exists)
-            if conversation_state:
-                try:
-                    update_conversation_history(call_sid, "assistant", greeting)
-                except Exception as history_error:
-                    logger.warning(f"⚠️ Failed to update conversation history: {history_error}")
-                    # Continue anyway - history update is not critical
-            
-            response.say(greeting, voice="alice")
-            logger.info(f"✅ Added greeting to TwiML: {greeting[:50]}...")
+                        logger.info(f"✅ Conversation state created for call {call_sid}")
+                    except Exception as state_error:
+                        logger.error(f"❌ Failed to create conversation state: {state_error}", exc_info=True)
+                        print(f"❌ State creation error: {state_error}")
+                        # Continue anyway - state creation is not critical for initial greeting
+                else:
+                    logger.warning(f"⚠️ Skipping conversation state creation - missing IDs: voice_agent_id={voice_agent_id}, real_estate_agent_id={real_estate_agent_id}")
+                
+                # Update conversation history (only if state exists)
+                if conversation_state:
+                    try:
+                        update_conversation_history(call_sid, "assistant", greeting)
+                    except Exception as history_error:
+                        logger.warning(f"⚠️ Failed to update conversation history: {history_error}")
+                        # Continue anyway - history update is not critical
+                
+                response.say(greeting, voice="alice")
+                logger.info(f"✅ Added greeting to TwiML: {greeting[:50]}...")
         
         # Always gather speech
         gather = Gather(
