@@ -4,6 +4,7 @@ from app.models.real_estate_agent import RealEstateAgent
 from app.models.property import Property
 from app.models.document import Document
 from app.models.phone_number import PhoneNumber
+from app.models.contact import Contact
 
 
 async def get_admin_dashboard_stats() -> dict:
@@ -38,8 +39,10 @@ async def get_admin_dashboard_stats() -> dict:
         total_phone_numbers_result = await session.execute(total_phone_numbers_stmt)
         total_phone_numbers = total_phone_numbers_result.scalar() or 0
         
-        # Contacts count (will be 0 until Contact model is created)
-        total_contacts = 0
+        # Contacts count
+        total_contacts_stmt = select(func.count(Contact.id))
+        total_contacts_result = await session.execute(total_contacts_stmt)
+        total_contacts = total_contacts_result.scalar() or 0
         
         return {
             "real_estate_agents": {

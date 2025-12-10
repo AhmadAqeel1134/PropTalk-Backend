@@ -13,7 +13,17 @@ class Settings(BaseSettings):
     TWILIO_PHONE_NUMBER: Optional[str] = None
     TWILIO_VOICE_WEBHOOK_URL: Optional[str] = None  # Base URL for webhooks (ngrok or production)
     
+    # OpenAI (legacy - can be removed if not needed)
     OPENAI_API_KEY: Optional[str] = None
+    OPENAI_MODEL: Optional[str] = "gpt-3.5-turbo"
+    OPENAI_MAX_TOKENS: Optional[int] = 150
+    OPENAI_TEMPERATURE: Optional[float] = 0.7
+    
+    # Google Gemini API
+    GEMINI_API_KEY: Optional[str] = None
+    GEMINI_MODEL: Optional[str] = "gemini-2.5-flash-lite"  # Balanced model optimized for low latency
+    GEMINI_MAX_TOKENS: Optional[int] = 200  # Gemini allows more tokens
+    GEMINI_TEMPERATURE: Optional[float] = 0.7
     
     CLOUDINARY_CLOUD_NAME: str
     CLOUDINARY_API_KEY: str

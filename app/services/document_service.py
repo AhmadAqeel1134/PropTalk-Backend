@@ -46,45 +46,96 @@ async def upload_document(
             parsed_properties = parsed_data.get("properties", [])
             parsed_contacts = parsed_data.get("contacts", [])
             
+            print(f"\n{'='*60}")
+            print(f"📊 PARSING RESULTS")
+            print(f"{'='*60}")
+            print(f"Properties extracted: {len(parsed_properties)}")
+            print(f"Unique contacts extracted: {len(parsed_contacts)}")
+            print(f"{'='*60}\n")
+            
             # First, create/find contacts and build phone->contact_id mapping
+            # Use normalized phone (digits only) as key for consistent lookup
+            from app.services.real_estate_agent.contact_service import normalize_phone
+            
             phone_to_contact_id = {}
+            contacts_created = 0
+            contacts_found = 0
+            
             for contact_data in parsed_contacts:
-                contact = await find_or_create_contact_by_phone(
-                    real_estate_agent_id=real_estate_agent_id,
-                    name=contact_data["name"],
-                    phone_number=contact_data["phone_number"],
-                    email=contact_data.get("email")
-                )
-                phone_to_contact_id[contact_data["phone_number"]] = contact["id"]
+                try:
+                    contact = await find_or_create_contact_by_phone(
+                        real_estate_agent_id=real_estate_agent_id,
+                        name=contact_data["name"],
+                        phone_number=contact_data["phone_number"],
+                        email=contact_data.get("email")
+                    )
+                    # Use normalized phone (digits only) as key - this matches how we'll look it up
+                    normalized_key = normalize_phone(contact_data["phone_number"])
+                    phone_to_contact_id[normalized_key] = contact["id"]
+                    
+                    # Check if this was a new contact or existing
+                    # (We can't easily tell, but we can count)
+                    contacts_created += 1
+                    print(f"  🔗 Contact: {contact['name']} - {normalized_key} -> {contact['id']}")
+                except Exception as contact_err:
+                    print(f"  ❌ Failed to create contact {contact_data.get('name', 'Unknown')}: {contact_err}")
+                    continue
+            
+            print(f"\n✅ Created/found {contacts_created} contacts")
+            print(f"📋 Contact mapping: {len(phone_to_contact_id)} phone numbers mapped\n")
             
             # Save properties to database and link to contacts
+            properties_created = 0
+            properties_linked = 0
+            properties_unlinked = 0
+            
             for prop_data in parsed_properties:
-                owner_phone = prop_data.get("owner_phone", "")
-                normalized_phone = ''.join(filter(str.isdigit, owner_phone))
-                contact_id = phone_to_contact_id.get(normalized_phone)
-                
-                property_id = str(uuid.uuid4())
-                new_property = Property(
-                    id=property_id,
-                    real_estate_agent_id=real_estate_agent_id,
-                    document_id=document_id,
-                    contact_id=contact_id,  # Link to contact for Twilio integration
-                    property_type=prop_data.get("property_type"),
-                    address=prop_data.get("address", ""),
-                    city=prop_data.get("city"),
-                    state=prop_data.get("state"),
-                    zip_code=prop_data.get("zip_code"),
-                    price=str(prop_data.get("price")) if prop_data.get("price") else None,
-                    bedrooms=prop_data.get("bedrooms"),
-                    bathrooms=prop_data.get("bathrooms"),
-                    square_feet=prop_data.get("square_feet"),
-                    description=prop_data.get("description"),
-                    amenities=prop_data.get("amenities"),
-                    owner_name=prop_data.get("owner_name"),
-                    owner_phone=prop_data.get("owner_phone", ""),
-                    is_available=prop_data.get("is_available", "true"),
-                )
-                session.add(new_property)
+                try:
+                    owner_phone = prop_data.get("owner_phone", "")
+                    # Normalize phone the same way (digits only) for lookup
+                    normalized_phone = normalize_phone(owner_phone)
+                    contact_id = phone_to_contact_id.get(normalized_phone)
+                    
+                    property_id = str(uuid.uuid4())
+                    new_property = Property(
+                        id=property_id,
+                        real_estate_agent_id=real_estate_agent_id,
+                        document_id=document_id,
+                        contact_id=contact_id,  # Link to contact for Twilio integration
+                        property_type=prop_data.get("property_type"),
+                        address=prop_data.get("address", ""),
+                        city=prop_data.get("city"),
+                        state=prop_data.get("state"),
+                        zip_code=prop_data.get("zip_code"),
+                        price=str(prop_data.get("price")) if prop_data.get("price") else None,
+                        bedrooms=prop_data.get("bedrooms"),
+                        bathrooms=prop_data.get("bathrooms"),
+                        square_feet=prop_data.get("square_feet"),
+                        description=prop_data.get("description"),
+                        amenities=prop_data.get("amenities"),
+                        owner_name=prop_data.get("owner_name"),
+                        owner_phone=prop_data.get("owner_phone", ""),
+                        is_available=prop_data.get("is_available", "true"),
+                    )
+                    session.add(new_property)
+                    properties_created += 1
+                    
+                    if contact_id:
+                        properties_linked += 1
+                        if properties_linked <= 5:  # Only log first 5 to avoid spam
+                            print(f"  ✅ Property {properties_created}: '{prop_data.get('address', '')[:40]}...' -> Contact {contact_id}")
+                    else:
+                        properties_unlinked += 1
+                        if properties_unlinked <= 5:  # Only log first 5
+                            print(f"  ⚠️ Property {properties_created}: '{prop_data.get('address', '')[:40]}...' -> NO CONTACT (phone: {normalized_phone or 'missing'})")
+                except Exception as prop_err:
+                    print(f"  ❌ Failed to create property: {prop_err}")
+                    continue
+            
+            print(f"\n✅ Created {properties_created} properties")
+            print(f"🔗 Linked {properties_linked} properties to contacts")
+            print(f"⚠️ {properties_unlinked} properties without contact links")
+            print(f"{'='*60}\n")
             
             await session.commit()
         except Exception as e:

@@ -3,6 +3,14 @@ from typing import Optional, Dict, List
 from datetime import datetime
 
 
+class AgentStatsResponse(BaseModel):
+    """Agent statistics for voice agent request response"""
+    properties_count: int
+    documents_count: int
+    contacts_count: int
+    has_phone_number: bool
+
+
 class VoiceAgentRequestResponse(BaseModel):
     """Response schema for voice agent request"""
     id: str
@@ -17,6 +25,8 @@ class VoiceAgentRequestResponse(BaseModel):
     # Denormalized agent info for admin UI
     agent_name: Optional[str] = None
     agent_email: Optional[str] = None
+    agent_company_name: Optional[str] = None
+    agent_stats: Optional[AgentStatsResponse] = None
     # Related voice agent / phone info (if already approved)
     voice_agent_id: Optional[str] = None
     voice_agent_phone_number: Optional[str] = None

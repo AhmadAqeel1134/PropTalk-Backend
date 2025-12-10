@@ -64,19 +64,37 @@ def get_existing_phone_number_sync(phone_number: str) -> Dict[str, str]:
     """
     try:
         client = get_twilio_client()
+        if not client:
+            raise ValueError("Twilio client not configured. Please check TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN in .env")
+        
+        # Normalize phone number to E.164 format if needed
+        normalized = phone_number.strip()
+        if not normalized.startswith("+"):
+            # Try to add + if it looks like a number
+            if normalized.replace(" ", "").replace("-", "").isdigit():
+                normalized = "+" + normalized.replace(" ", "").replace("-", "")
+        
         # Twilio normalizes phone numbers to E.164, so we rely on exact match
-        incoming_numbers = client.incoming_phone_numbers.list(phone_number=phone_number, limit=1)
+        incoming_numbers = client.incoming_phone_numbers.list(phone_number=normalized, limit=1)
         if not incoming_numbers:
-            raise ValueError("Phone number not found in Twilio account")
+            # Try without + prefix
+            if normalized.startswith("+"):
+                incoming_numbers = client.incoming_phone_numbers.list(phone_number=normalized[1:], limit=1)
+        
+        if not incoming_numbers:
+            raise ValueError(f"Phone number '{phone_number}' not found in your Twilio account. Please ensure the number is purchased in Twilio Console or leave phone number empty to auto-purchase a new number.")
 
         number = incoming_numbers[0]
         return {
             "phone_number": number.phone_number,
             "sid": number.sid,
         }
+    except ValueError:
+        # Re-raise ValueError as-is (already has good message)
+        raise
     except Exception as e:
         logger.error(f"Error looking up existing phone number: {str(e)}")
-        raise ValueError(f"Failed to find existing phone number: {str(e)}")
+        raise ValueError(f"Failed to find existing phone number '{phone_number}': {str(e)}. Please check Twilio credentials and ensure the number exists in your Twilio account.")
 
 
 async def get_existing_phone_number(phone_number: str) -> Dict[str, str]:
@@ -102,4 +120,44 @@ async def release_phone_number(twilio_sid: str) -> bool:
     import asyncio
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, release_phone_number_sync, twilio_sid)
+
+
+def update_phone_number_webhooks_sync(twilio_sid: str) -> bool:
+    """
+    Update phone number webhook URLs in Twilio to match current TWILIO_VOICE_WEBHOOK_URL
+    This ensures status callbacks use the correct URL
+    """
+    try:
+        client = get_twilio_client()
+        if not settings.TWILIO_VOICE_WEBHOOK_URL:
+            logger.warning("TWILIO_VOICE_WEBHOOK_URL not configured, skipping webhook update")
+            return False
+        
+        base_url = settings.TWILIO_VOICE_WEBHOOK_URL.rstrip('/')
+        voice_url = f"{base_url}/webhooks/twilio/voice"
+        status_callback = f"{base_url}/webhooks/twilio/status"
+        
+        logger.info(f"Updating phone number {twilio_sid} webhooks to: {base_url}")
+        
+        client.incoming_phone_numbers(twilio_sid).update(
+            voice_url=voice_url,
+            voice_method='POST',
+            status_callback=status_callback,
+            status_callback_method='POST',
+            voice_fallback_url=voice_url,
+            voice_fallback_method='POST'
+        )
+        
+        logger.info(f"✅ Successfully updated phone number {twilio_sid} webhooks")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Error updating phone number webhooks: {str(e)}", exc_info=True)
+        return False
+
+
+async def update_phone_number_webhooks(twilio_sid: str) -> bool:
+    """Async wrapper for updating phone number webhooks"""
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, update_phone_number_webhooks_sync, twilio_sid)
 

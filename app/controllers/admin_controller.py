@@ -264,7 +264,7 @@ class RejectRequest(BaseModel):
 
 
 class ApproveRequest(BaseModel):
-    phone_number: str
+    phone_number: str  # REQUIRED - Admin must purchase number in Twilio Console and enter it here
 
 
 @router.post("/voice-agent-requests/{request_id}/approve", response_model=dict)
@@ -274,13 +274,27 @@ async def approve_voice_agent_request_endpoint(
     admin_id: str = Depends(get_current_admin_id)
 ):
     """Approve voice agent request (Admin only)"""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"🔵 [APPROVE] Starting approval for request_id={request_id}, admin_id={admin_id}")
+    logger.info(f"🔵 [APPROVE] Received phone_number: '{approve_data.phone_number}' (type: {type(approve_data.phone_number)})")
+    
     try:
         result = await approve_voice_agent_request(request_id, admin_id, approve_data.phone_number)
+        logger.info(f"✅ [APPROVE] Successfully approved request: {result}")
         return result
     except ValueError as e:
+        logger.error(f"❌ [APPROVE] ValueError: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
+        )
+    except Exception as e:
+        logger.error(f"❌ [APPROVE] Unexpected error: {type(e).__name__}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}"
         )
 
 

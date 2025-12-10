@@ -35,11 +35,28 @@ def upgrade() -> None:
     op.create_index('idx_agent_phone', 'contacts', ['real_estate_agent_id', 'phone_number'], unique=False)
     op.create_index(op.f('ix_contacts_phone_number'), 'contacts', ['phone_number'], unique=False)
     op.create_index(op.f('ix_contacts_real_estate_agent_id'), 'contacts', ['real_estate_agent_id'], unique=False)
-    op.drop_index('idx_documents_agent_id', table_name='documents')
-    op.drop_index('idx_phone_numbers_agent_id', table_name='phone_numbers')
-    op.drop_index('idx_phone_numbers_is_active', table_name='phone_numbers')
+    
+    # Drop indexes only if they exist (for fresh databases, they may not exist)
+    # Use connection to check and drop safely
+    bind = op.get_bind()
+    
+    # Helper function to drop index if exists
+    def drop_index_if_exists(index_name, table_name):
+        result = bind.execute(sa.text(
+            "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = :idx_name AND tablename = :tbl_name)"
+        ), {"idx_name": index_name, "tbl_name": table_name})
+        exists = result.scalar()
+        if exists:
+            op.drop_index(index_name, table_name=table_name)
+    
+    # Drop indexes safely
+    drop_index_if_exists('idx_documents_agent_id', 'documents')
+    drop_index_if_exists('idx_phone_numbers_agent_id', 'phone_numbers')
+    drop_index_if_exists('idx_phone_numbers_is_active', 'phone_numbers')
+    
     op.add_column('properties', sa.Column('contact_id', sa.String(), nullable=True))
-    op.drop_index('idx_properties_agent_id', table_name='properties')
+    
+    drop_index_if_exists('idx_properties_agent_id', 'properties')
     op.create_index('idx_agent_available', 'properties', ['real_estate_agent_id', 'is_available'], unique=False)
     op.create_index('idx_agent_type', 'properties', ['real_estate_agent_id', 'property_type'], unique=False)
     op.create_index('idx_contact_properties', 'properties', ['contact_id', 'is_available'], unique=False)
@@ -49,11 +66,13 @@ def upgrade() -> None:
     op.create_index(op.f('ix_properties_property_type'), 'properties', ['property_type'], unique=False)
     op.create_index(op.f('ix_properties_real_estate_agent_id'), 'properties', ['real_estate_agent_id'], unique=False)
     op.create_foreign_key(None, 'properties', 'contacts', ['contact_id'], ['id'], ondelete='SET NULL')
-    op.drop_index('idx_agents_company_name', table_name='real_estate_agents')
-    op.drop_index('idx_agents_full_name', table_name='real_estate_agents')
-    op.drop_index('idx_agents_is_active', table_name='real_estate_agents')
-    op.drop_index('idx_agents_is_verified', table_name='real_estate_agents')
-    op.drop_index('idx_agents_verified_active', table_name='real_estate_agents')
+    
+    # Drop indexes on real_estate_agents only if they exist
+    drop_index_if_exists('idx_agents_company_name', 'real_estate_agents')
+    drop_index_if_exists('idx_agents_full_name', 'real_estate_agents')
+    drop_index_if_exists('idx_agents_is_active', 'real_estate_agents')
+    drop_index_if_exists('idx_agents_is_verified', 'real_estate_agents')
+    drop_index_if_exists('idx_agents_verified_active', 'real_estate_agents')
     # ### end Alembic commands ###
 
 

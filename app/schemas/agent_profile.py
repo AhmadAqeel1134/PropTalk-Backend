@@ -3,7 +3,7 @@ from typing import Optional
 
 
 class AgentProfileResponse(BaseModel):
-    id: str
+    # Intentionally omitting internal IDs to keep UI clean
     email: str
     full_name: str
     company_name: Optional[str]

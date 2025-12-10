@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, ForeignKey, Integer, Text, Index
+from sqlalchemy import Column, String, DateTime, ForeignKey, Integer, Text, Index, JSON
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from app.database.connection import Base
@@ -35,6 +35,8 @@ class Call(Base):
     recording_url = Column(Text, nullable=True)  # Twilio recording URL
     recording_sid = Column(String, nullable=True, index=True)  # Twilio Recording SID
     transcript = Column(Text, nullable=True)  # STT transcript (if available)
+    transcript_json = Column(JSON, nullable=True)  # Structured transcript (list of messages)
+    user_pov_summary = Column(Text, nullable=True)  # 1-2 line summary of user intent/POV
     started_at = Column(DateTime(timezone=True), nullable=True)
     answered_at = Column(DateTime(timezone=True), nullable=True)
     ended_at = Column(DateTime(timezone=True), nullable=True)

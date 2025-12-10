@@ -5,6 +5,7 @@ from app.models.real_estate_agent import RealEstateAgent
 from app.models.property import Property
 from app.models.document import Document
 from app.models.phone_number import PhoneNumber
+from app.models.contact import Contact
 
 
 async def get_agent_summary_stats(agent_id: str, session) -> dict:
@@ -27,8 +28,10 @@ async def get_agent_summary_stats(agent_id: str, session) -> dict:
     phone_result = await session.execute(phone_stmt)
     has_phone_number = phone_result.scalar_one_or_none() is not None
     
-    # Contacts count (will be 0 until Contact model is created)
-    contacts_count = 0
+    # Count contacts
+    contacts_stmt = select(func.count(Contact.id)).where(Contact.real_estate_agent_id == agent_id)
+    contacts_result = await session.execute(contacts_stmt)
+    contacts_count = contacts_result.scalar() or 0
     
     return {
         "properties_count": properties_count,
@@ -96,6 +99,16 @@ async def get_all_real_estate_agents(
             documents_result = await session.execute(documents_counts_stmt)
             documents_counts = {row[0]: row[1] for row in documents_result.all()}
             
+            # Get all contact counts in one query
+            contacts_counts_stmt = select(
+                Contact.real_estate_agent_id,
+                func.count(Contact.id).label('count')
+            ).where(
+                Contact.real_estate_agent_id.in_(agent_ids)
+            ).group_by(Contact.real_estate_agent_id)
+            contacts_result = await session.execute(contacts_counts_stmt)
+            contacts_counts = {row[0]: row[1] for row in contacts_result.all()}
+            
             # Get all phone numbers in one query
             phone_numbers_stmt = select(PhoneNumber.real_estate_agent_id).where(
                 PhoneNumber.real_estate_agent_id.in_(agent_ids),
@@ -123,7 +136,7 @@ async def get_all_real_estate_agents(
                 agent_dict["stats"] = {
                     "properties_count": properties_counts.get(agent.id, 0),
                     "documents_count": documents_counts.get(agent.id, 0),
-                    "contacts_count": 0,  # Will be updated when Contact model is created
+                    "contacts_count": contacts_counts.get(agent.id, 0),
                     "has_phone_number": agent.id in agents_with_phones,
                 }
             
