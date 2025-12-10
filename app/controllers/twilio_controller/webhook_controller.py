@@ -56,16 +56,19 @@ async def twilio_voice_webhook(request: Request):
     import asyncio
     import traceback
     
-    # Log that we received a POST request
+    # Log IMMEDIATELY when function is called
+    print("\n" + "="*80)
+    print("🚨 WEBHOOK FUNCTION CALLED - /webhooks/twilio/voice")
+    print("="*80)
     logger.info("📥 POST request received for /webhooks/twilio/voice")
-    print("\n" + "="*60)
     print("📥 POST REQUEST RECEIVED - /webhooks/twilio/voice")
-    print("="*60)
     
     try:
         # Get form data from Twilio (this is fast)
+        print("⏳ Getting form data...")
         form_data = await request.form()
         form_dict = dict(form_data)
+        print(f"✅ Form data received: {len(form_dict)} fields")
         
         # Log ALL form data for debugging
         logger.info(f"📋 Form data received: {form_dict}")
@@ -90,11 +93,13 @@ async def twilio_voice_webhook(request: Request):
         
         # Process webhook with timeout protection
         # Twilio expects response within 3 seconds, so we'll timeout after 2.5 seconds
+        print("⏳ Calling handle_voice_webhook...")
         try:
             twiml_response = await asyncio.wait_for(
                 handle_voice_webhook(form_dict),
                 timeout=2.5
             )
+            print("✅ handle_voice_webhook completed successfully")
             logger.info(f"✅ Returning TwiML response (length: {len(twiml_response)} bytes)")
             print(f"✅ TwiML response generated: {len(twiml_response)} bytes")
             print(f"📄 TwiML preview: {twiml_response[:200]}...")
@@ -124,18 +129,25 @@ async def twilio_voice_webhook(request: Request):
     except Exception as e:
         error_msg = str(e)
         error_trace = traceback.format_exc()
+        error_type = type(e).__name__
         logger.error(f"❌ Error in voice webhook: {error_msg}", exc_info=True)
-        print(f"\n❌ ERROR IN WEBHOOK HANDLER:")
-        print(f"Error: {error_msg}")
-        print(f"Traceback:\n{error_trace}\n")
+        print(f"\n{'='*80}")
+        print(f"❌ CRITICAL ERROR IN WEBHOOK HANDLER")
+        print(f"{'='*80}")
+        print(f"Error Type: {error_type}")
+        print(f"Error Message: {error_msg}")
+        print(f"Full Traceback:\n{error_trace}")
+        print(f"{'='*80}\n")
         
         # Return error TwiML - always return something valid
         from twilio.twiml.voice_response import VoiceResponse
         response = VoiceResponse()
-        response.say("Hello, thank you for calling. We're experiencing technical difficulties. Please try again later.", voice="alice")
+        response.say("We're sorry, an application error occurred. Please try again later.", voice="alice")
         response.hangup()
+        twiml_str = str(response)
+        print(f"📤 Returning error TwiML ({len(twiml_str)} bytes)")
         return Response(
-            content=str(response),
+            content=twiml_str,
             media_type="application/xml",
             headers={
                 "Cache-Control": "no-cache",

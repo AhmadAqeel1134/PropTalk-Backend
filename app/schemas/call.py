@@ -7,18 +7,23 @@ class CallResponse(BaseModel):
     """Response schema for call"""
     id: str
     voice_agent_id: str
+    voice_agent_name: Optional[str] = None  # From relationship
     real_estate_agent_id: str
     twilio_call_sid: str
     contact_id: Optional[str] = None
     contact_name: Optional[str] = None  # From relationship
+    contact_phone: Optional[str] = None  # From relationship
     from_number: str
     to_number: str
+    twilio_phone_number: Optional[str] = None  # Voice agent's Twilio number
     status: str
     direction: str  # 'inbound' | 'outbound'
     duration_seconds: int
     recording_url: Optional[str] = None
     recording_sid: Optional[str] = None
     transcript: Optional[str] = None
+    transcript_json: Optional[List[Dict[str, Any]]] = None
+    user_pov_summary: Optional[str] = None
     started_at: Optional[str] = None
     answered_at: Optional[str] = None
     ended_at: Optional[str] = None
@@ -52,7 +57,7 @@ class CallBatchRequest(BaseModel):
 class CallRecordingResponse(BaseModel):
     """Response schema for call recording"""
     recording_url: str
-    recording_sid: str
+    recording_sid: Optional[str] = ""
     duration_seconds: int
 
 

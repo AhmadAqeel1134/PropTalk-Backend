@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends, status
 from typing import List, Optional
 from app.schemas.phone_number import PhoneNumberResponse, PhoneNumberUpdateRequest
 from app.services.phone_number_service import (
-    assign_phone_number_to_agent,
+    # assign_phone_number_to_agent,  # DISABLED - Auto-purchase removed
     get_phone_number_by_agent_id,
     get_phone_number_by_id,
     update_phone_number,
@@ -13,21 +13,22 @@ from app.utils.dependencies import get_current_real_estate_agent_id, get_current
 router = APIRouter(prefix="/phone-numbers", tags=["Phone Numbers"])
 
 
-@router.post("/assign/{real_estate_agent_id}", response_model=PhoneNumberResponse, status_code=status.HTTP_201_CREATED)
-async def assign_phone_number_endpoint(
-    real_estate_agent_id: str,
-    area_code: Optional[str] = None,
-    admin_id: str = Depends(get_current_admin_id)
-):
-    """Assign a phone number to a real estate agent (Admin only)"""
-    try:
-        phone = await assign_phone_number_to_agent(real_estate_agent_id, area_code)
-        return PhoneNumberResponse(**phone)
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+# AUTO-PURCHASE DISABLED - Admin must manually purchase numbers in Twilio Console
+# @router.post("/assign/{real_estate_agent_id}", response_model=PhoneNumberResponse, status_code=status.HTTP_201_CREATED)
+# async def assign_phone_number_endpoint(
+#     real_estate_agent_id: str,
+#     area_code: Optional[str] = None,
+#     admin_id: str = Depends(get_current_admin_id)
+# ):
+#     """Assign a phone number to a real estate agent (Admin only)"""
+#     try:
+#         phone = await assign_phone_number_to_agent(real_estate_agent_id, area_code)
+#         return PhoneNumberResponse(**phone)
+#     except ValueError as e:
+#         raise HTTPException(
+#             status_code=status.HTTP_400_BAD_REQUEST,
+#             detail=str(e)
+#         )
 
 
 @router.get("/my-phone-number", response_model=PhoneNumberResponse)

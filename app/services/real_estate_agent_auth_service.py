@@ -4,7 +4,8 @@ from sqlalchemy import select
 from app.database.connection import AsyncSessionLocal
 from app.models.real_estate_agent import RealEstateAgent
 from app.utils.security import verify_password, get_password_hash
-from app.services.phone_number_service import assign_phone_number_to_agent
+# AUTO-PURCHASE DISABLED
+# from app.services.phone_number_service import assign_phone_number_to_agent
 
 
 async def register_real_estate_agent(
@@ -45,12 +46,13 @@ async def register_real_estate_agent(
         await session.commit()
         await session.refresh(new_agent)
         
+        # AUTO-PURCHASE DISABLED - Phone numbers must be assigned manually by admin when approving voice agent requests
         # Automatically assign a phone number to the agent
-        try:
-            await assign_phone_number_to_agent(agent_id)
-        except Exception as e:
-            # Log error but don't fail registration if phone assignment fails
-            print(f"Warning: Failed to assign phone number during registration: {str(e)}")
+        # try:
+        #     await assign_phone_number_to_agent(agent_id)
+        # except Exception as e:
+        #     # Log error but don't fail registration if phone assignment fails
+        #     print(f"Warning: Failed to assign phone number during registration: {str(e)}")
         
         return {
             "id": agent_id,
@@ -161,11 +163,12 @@ async def get_or_create_agent_from_google(google_info: dict) -> dict:
         await session.commit()
         await session.refresh(new_agent)
         
+        # AUTO-PURCHASE DISABLED - Phone numbers must be assigned manually by admin when approving voice agent requests
         # Automatically assign a phone number to the agent
-        try:
-            await assign_phone_number_to_agent(agent_id)
-        except Exception as e:
-            print(f"Warning: Failed to assign phone number during Google registration: {str(e)}")
+        # try:
+        #     await assign_phone_number_to_agent(agent_id)
+        # except Exception as e:
+        #     print(f"Warning: Failed to assign phone number during Google registration: {str(e)}")
         
         return {
             "id": agent_id,

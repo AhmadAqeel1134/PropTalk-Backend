@@ -120,3 +120,8 @@ Once running, visit:
 
 ## Ngrok tunnel activation
 & "D:\Ngrok\ngrok-v3-stable-windows-amd64\ngrok.exe" http 8000
+## Cloud fare tunnel
+D:\cloudflare\cloudflared-windows-amd64.exe tunnel --url http://127.0.0.1:8000
+
+## Backend Start 
+python -m uvicorn app.main:app --reload

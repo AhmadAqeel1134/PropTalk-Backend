@@ -24,6 +24,7 @@ async def get_my_properties(
     city: Optional[str] = None,
     is_available: Optional[str] = None,
     contact_id: Optional[str] = None,
+    bedrooms: Optional[int] = None,
     page: int = 1,
     page_size: int = 16,
     agent_id: str = Depends(get_current_real_estate_agent_id)
@@ -39,6 +40,7 @@ async def get_my_properties(
         city=city,
         is_available=is_available,
         contact_id=contact_id,
+        bedrooms=bedrooms,
         page=page,
         page_size=page_size,
     )

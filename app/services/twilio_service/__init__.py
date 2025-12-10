@@ -9,10 +9,7 @@ from app.services.twilio_service.client import (
 from app.services.twilio_service.webhook_service import (
     handle_voice_webhook,
     handle_status_webhook,
-    handle_recording_webhook,
-    process_speech_to_text,
-    process_with_llm,
-    text_to_speech
+    handle_recording_webhook
 )
 
 __all__ = [
@@ -24,9 +21,5 @@ __all__ = [
     "handle_voice_webhook",
     "handle_status_webhook",
     "handle_recording_webhook",
-    # AI Processing
-    "process_speech_to_text",
-    "process_with_llm",
-    "text_to_speech",
 ]
 

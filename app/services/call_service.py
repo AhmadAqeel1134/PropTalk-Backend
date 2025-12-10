@@ -275,31 +275,79 @@ async def get_calls_by_agent(
     real_estate_agent_id: str,
     page: int = 1,
     page_size: int = 20,
-    status: Optional[str] = None
+    status: Optional[str] = None,
+    direction: Optional[str] = None,
+    search: Optional[str] = None
 ) -> Tuple[List[Dict], int]:
-    """Get paginated calls for an agent"""
+    """Get paginated calls for an agent with server-side filtering and search"""
     async with AsyncSessionLocal() as session:
-        # Build query
+        from sqlalchemy import or_
+        from app.models.contact import Contact
+        
+        # Build query with joins for search
         conditions = [Call.real_estate_agent_id == real_estate_agent_id]
+        
         if status:
             conditions.append(Call.status == status)
+        if direction:
+            conditions.append(Call.direction == direction)
         
-        where_clause = and_(*conditions)
+        # Build search conditions separately to include contact name search
+        if search:
+            search_pattern = f"%{search}%"
+            # Search in phone numbers and contact name
+            search_conditions = or_(
+                Call.from_number.ilike(search_pattern),
+                Call.to_number.ilike(search_pattern),
+                Contact.name.ilike(search_pattern),
+                Contact.phone_number.ilike(search_pattern)
+            )
+            # Combine with existing conditions
+            final_where = and_(*conditions, search_conditions)
+            
+            # Count query with contact join for search
+            count_stmt = (
+                select(func.count(Call.id))
+                .select_from(Call)
+                .outerjoin(Contact, Call.contact_id == Contact.id)
+                .where(final_where)
+            )
+            
+            # Paginated query with contact join for search
+            stmt = (
+                select(Call)
+                .outerjoin(Contact, Call.contact_id == Contact.id)
+                .options(
+                    selectinload(Call.contact),
+                    selectinload(Call.voice_agent).selectinload(VoiceAgent.phone_number)
+                )
+                .where(final_where)
+                .order_by(desc(Call.created_at))
+                .offset(max(page - 1, 0) * page_size)
+                .limit(page_size)
+            )
+        else:
+            where_clause = and_(*conditions)
+            
+            # Count query without search
+            count_stmt = select(func.count(Call.id)).select_from(Call).where(where_clause)
+            
+            # Paginated query without search
+            stmt = (
+                select(Call)
+                .options(
+                    selectinload(Call.contact),
+                    selectinload(Call.voice_agent).selectinload(VoiceAgent.phone_number)
+                )
+                .where(where_clause)
+                .order_by(desc(Call.created_at))
+                .offset(max(page - 1, 0) * page_size)
+                .limit(page_size)
+            )
         
-        # Total count
-        count_stmt = select(func.count()).select_from(Call).where(where_clause)
+        # Execute count query
         count_result = await session.execute(count_stmt)
         total = count_result.scalar_one() or 0
-        
-        # Paginated query
-        stmt = (
-            select(Call)
-            .options(selectinload(Call.contact))
-            .where(where_clause)
-            .order_by(desc(Call.created_at))
-            .offset(max(page - 1, 0) * page_size)
-            .limit(page_size)
-        )
         
         result = await session.execute(stmt)
         calls = result.scalars().all()
@@ -308,18 +356,23 @@ async def get_calls_by_agent(
             {
                 "id": call.id,
                 "voice_agent_id": call.voice_agent_id,
+                "voice_agent_name": call.voice_agent.name if call.voice_agent else None,
                 "real_estate_agent_id": call.real_estate_agent_id,
                 "twilio_call_sid": call.twilio_call_sid,
                 "contact_id": call.contact_id,
                 "contact_name": call.contact.name if call.contact else None,
+                "contact_phone": call.contact.phone_number if call.contact else None,
                 "from_number": call.from_number,
                 "to_number": call.to_number,
+                "twilio_phone_number": call.voice_agent.phone_number.twilio_phone_number if call.voice_agent and call.voice_agent.phone_number else None,
                 "status": call.status,
                 "direction": call.direction,
                 "duration_seconds": call.duration_seconds,
                 "recording_url": call.recording_url,
                 "recording_sid": call.recording_sid,
                 "transcript": call.transcript,
+                "transcript_json": call.transcript_json,
+                "user_pov_summary": call.user_pov_summary,
                 "started_at": call.started_at.isoformat() if call.started_at else None,
                 "answered_at": call.answered_at.isoformat() if call.answered_at else None,
                 "ended_at": call.ended_at.isoformat() if call.ended_at else None,
@@ -333,11 +386,14 @@ async def get_calls_by_agent(
 
 
 async def get_call_by_id(call_id: str, real_estate_agent_id: str) -> Optional[Dict]:
-    """Get a specific call by ID"""
+    """Get a specific call by ID with proper joins"""
     async with AsyncSessionLocal() as session:
         stmt = (
             select(Call)
-            .options(selectinload(Call.contact))
+            .options(
+                selectinload(Call.contact),
+                selectinload(Call.voice_agent).selectinload(VoiceAgent.phone_number)
+            )
             .where(
                 and_(
                     Call.id == call_id,
@@ -354,18 +410,23 @@ async def get_call_by_id(call_id: str, real_estate_agent_id: str) -> Optional[Di
         return {
             "id": call.id,
             "voice_agent_id": call.voice_agent_id,
+            "voice_agent_name": call.voice_agent.name if call.voice_agent else None,
             "real_estate_agent_id": call.real_estate_agent_id,
             "twilio_call_sid": call.twilio_call_sid,
             "contact_id": call.contact_id,
             "contact_name": call.contact.name if call.contact else None,
+            "contact_phone": call.contact.phone_number if call.contact else None,
             "from_number": call.from_number,
             "to_number": call.to_number,
+            "twilio_phone_number": call.voice_agent.phone_number.twilio_phone_number if call.voice_agent and call.voice_agent.phone_number else None,
             "status": call.status,
             "direction": call.direction,
             "duration_seconds": call.duration_seconds,
             "recording_url": call.recording_url,
             "recording_sid": call.recording_sid,
             "transcript": call.transcript,
+            "transcript_json": call.transcript_json,
+            "user_pov_summary": call.user_pov_summary,
             "started_at": call.started_at.isoformat() if call.started_at else None,
             "answered_at": call.answered_at.isoformat() if call.answered_at else None,
             "ended_at": call.ended_at.isoformat() if call.ended_at else None,
@@ -437,8 +498,13 @@ async def save_recording(
         }
 
 
-async def save_transcript(call_id: str, transcript: str) -> Optional[Dict]:
-    """Save transcript for a call"""
+async def save_transcript(
+    call_id: str,
+    transcript: str,
+    transcript_json: Optional[List[Dict]] = None,
+    user_pov_summary: Optional[str] = None
+) -> Optional[Dict]:
+    """Save transcript and structured history for a call"""
     async with AsyncSessionLocal() as session:
         stmt = select(Call).where(Call.id == call_id)
         result = await session.execute(stmt)
@@ -448,10 +514,43 @@ async def save_transcript(call_id: str, transcript: str) -> Optional[Dict]:
             return None
         
         call.transcript = transcript
+        call.transcript_json = transcript_json
+        call.user_pov_summary = user_pov_summary
         await session.commit()
         
         return {
             "id": call.id,
             "transcript": call.transcript,
+            "transcript_json": call.transcript_json,
+            "user_pov_summary": call.user_pov_summary,
+        }
+
+
+async def save_transcript_by_twilio_sid(
+    twilio_call_sid: str,
+    transcript: Optional[str],
+    transcript_json: Optional[List[Dict]] = None,
+    user_pov_summary: Optional[str] = None
+) -> Optional[Dict]:
+    """Save transcript and structured history using the Twilio Call SID"""
+    async with AsyncSessionLocal() as session:
+        stmt = select(Call).where(Call.twilio_call_sid == twilio_call_sid)
+        result = await session.execute(stmt)
+        call = result.scalar_one_or_none()
+        
+        if not call:
+            return None
+        
+        call.transcript = transcript
+        call.transcript_json = transcript_json
+        call.user_pov_summary = user_pov_summary
+        
+        await session.commit()
+        
+        return {
+            "id": call.id,
+            "transcript": call.transcript,
+            "transcript_json": call.transcript_json,
+            "user_pov_summary": call.user_pov_summary,
         }
 

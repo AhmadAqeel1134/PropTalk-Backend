@@ -79,6 +79,7 @@ async def get_properties_by_agent_id(
     city: Optional[str] = None,
     is_available: Optional[str] = None,
     contact_id: Optional[str] = None,
+    bedrooms: Optional[int] = None,
     page: int = 1,
     page_size: int = 16,
 ) -> Tuple[List[dict], int]:
@@ -114,6 +115,9 @@ async def get_properties_by_agent_id(
 
         if contact_id:
             conditions.append(Property.contact_id == contact_id)
+        
+        if bedrooms is not None:
+            conditions.append(Property.bedrooms == bedrooms)
 
         where_clause = and_(*conditions)
 
