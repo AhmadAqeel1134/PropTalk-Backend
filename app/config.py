@@ -37,7 +37,12 @@ class Settings(BaseSettings):
     ADMIN_THREE_EMAIL: str
     GOOGLE_CLIENT_ID: Optional[str] = None
     GOOGLE_CLIENT_SECRET: Optional[str] = None
-    
+
+    # Hugging Face / external sentiment service (user-only transcript)
+    SENTIMENT_ENABLED: bool = True
+    SENTIMENT_SERVICE_URL: str = "https://zayan0978-proptalk-sentiment.hf.space"
+    SENTIMENT_REQUEST_TIMEOUT_SECONDS: float = 60.0
+
     class Config:
         env_file = ".env"
         case_sensitive = True

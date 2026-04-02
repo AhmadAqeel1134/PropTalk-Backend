@@ -24,6 +24,8 @@ class CallResponse(BaseModel):
     transcript: Optional[str] = None
     transcript_json: Optional[List[Dict[str, Any]]] = None
     user_pov_summary: Optional[str] = None
+    sentiment_label: Optional[str] = None  # positive | neutral | negative
+    sentiment_scores: Optional[Dict[str, Any]] = None
     started_at: Optional[str] = None
     answered_at: Optional[str] = None
     ended_at: Optional[str] = None

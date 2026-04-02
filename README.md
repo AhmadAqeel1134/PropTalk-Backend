@@ -48,13 +48,38 @@ GOOGLE_CLIENT_ID=your-google-client-id
 GOOGLE_CLIENT_SECRET=your-google-client-secret
 ```
 
+### Local PostgreSQL with Docker (recommended for local dev)
+
+If you are using PostgreSQL through Docker Desktop, run a container first:
+
+```bash
+docker run --name proptalk-postgres ^
+  -e POSTGRES_USER=proptalk ^
+  -e POSTGRES_PASSWORD=proptalk123 ^
+  -e POSTGRES_DB=proptalk_db ^
+  -p 5432:5432 ^
+  -d postgres:16
+```
+
+Use this `DATABASE_URL` in `.env`:
+
+```env
+DATABASE_URL=postgresql://proptalk:proptalk123@localhost:5432/proptalk_db
+```
+
+If the container already exists, start it with:
+
+```bash
+docker start proptalk-postgres
+```
+
 3. **Run database migrations:**
 ```bash
 # Create initial migration (first time only)
-alembic revision --autogenerate -m "Initial migration"
+python -m alembic revision --autogenerate -m "Initial migration"
 
 # Apply migrations to create all tables
-alembic upgrade head
+python -m alembic upgrade head
 ```
 
 **Important:** All database tables are created through migrations. Run migrations before starting the server.
@@ -63,6 +88,20 @@ alembic upgrade head
 ```bash
 uvicorn app.main:app --reload
 ```
+
+If `uvicorn` is not available in PATH on Windows, use:
+
+```bash
+python -m uvicorn app.main:app --reload
+```
+
+If port `8000` is already in use, run backend on another port:
+
+```bash
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8001
+```
+
+Then point frontend API URL to the same backend port (for example, `http://localhost:8001`).
 
 ## Database Migrations
 
@@ -73,17 +112,17 @@ alembic revision --autogenerate -m "Description of changes"
 
 ### Apply migrations:
 ```bash
-alembic upgrade head
+python -m alembic upgrade head
 ```
 
 ### Rollback last migration:
 ```bash
-alembic downgrade -1
+python -m alembic downgrade -1
 ```
 
 ### Check current migration status:
 ```bash
-alembic current
+python -m alembic current
 ```
 
 ## Google OAuth Setup
