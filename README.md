@@ -125,3 +125,5 @@ D:\cloudflare\cloudflared-windows-amd64.exe tunnel --url http://127.0.0.1:8000
 
 ## Backend Start 
 python -m uvicorn app.main:app --reload
+
+D:\cloudflare\cloudflared-windows-amd64.exe tunnel --no-autoupdate --protocol http2 --url http://localhost:8000
