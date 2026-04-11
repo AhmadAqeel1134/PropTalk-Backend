@@ -37,6 +37,8 @@ class Call(Base):
     transcript = Column(Text, nullable=True)  # STT transcript (if available)
     transcript_json = Column(JSON, nullable=True)  # Structured transcript (list of messages)
     user_pov_summary = Column(Text, nullable=True)  # 1-2 line summary of user intent/POV
+    sentiment_label = Column(String(32), nullable=True)  # positive | neutral | negative (from sentiment API)
+    sentiment_scores = Column(JSON, nullable=True)  # { negative, neutral, positive }
     started_at = Column(DateTime(timezone=True), nullable=True)
     answered_at = Column(DateTime(timezone=True), nullable=True)
     ended_at = Column(DateTime(timezone=True), nullable=True)

@@ -263,9 +263,14 @@ async def stream_call_recording(
             
             if response.status_code != 200:
                 logger.error(f"Failed to fetch recording from Twilio: {response.status_code} - {response.text}")
+                if response.status_code in (401, 403):
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail="Recording access denied by Twilio. Verify TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN."
+                    )
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail="Failed to fetch recording from Twilio"
+                    detail=f"Failed to fetch recording from Twilio (status {response.status_code})"
                 )
             
             # Determine content type from response
@@ -289,6 +294,9 @@ async def stream_call_recording(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail="Timeout fetching recording"
         )
+    except HTTPException:
+        # Preserve explicit HTTP errors (don't wrap them as 500).
+        raise
     except Exception as e:
         logger.error(f"Error streaming recording: {str(e)}", exc_info=True)
         raise HTTPException(

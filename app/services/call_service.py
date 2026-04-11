@@ -2,8 +2,9 @@
 Call Service - Business logic for call management
 Handles call initiation, recording, and history
 """
+import asyncio
 import logging
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Any
 from datetime import datetime
 import uuid
 from sqlalchemy import select, and_, func, desc
@@ -13,9 +14,64 @@ from app.models.call import Call
 from app.models.voice_agent import VoiceAgent
 from app.models.contact import Contact
 from app.services.twilio_service.client import get_twilio_client
+from app.services.sentiment_service import analyze_sentiment, text_for_sentiment
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+async def _persist_call_sentiment(
+    call_id: str,
+    sentiment_label: str,
+    sentiment_scores: Optional[Dict[str, Any]],
+) -> None:
+    async with AsyncSessionLocal() as session:
+        stmt = select(Call).where(Call.id == call_id)
+        result = await session.execute(stmt)
+        call = result.scalar_one_or_none()
+        if not call:
+            return
+        call.sentiment_label = sentiment_label
+        call.sentiment_scores = sentiment_scores
+        await session.commit()
+
+
+async def enrich_calls_with_sentiment(items: List[Dict]) -> List[Dict]:
+    """
+    For calls with user_pov_summary and no stored sentiment, call external sentiment API
+    (user-only text), persist result, and attach to dicts. Bounded concurrency.
+    """
+    if not items:
+        return items
+    if not getattr(settings, "SENTIMENT_ENABLED", True):
+        return items
+
+    sem = asyncio.Semaphore(3)
+
+    async def process_one(d: Dict) -> None:
+        if not d.get("user_pov_summary"):
+            return
+        if d.get("sentiment_label"):
+            return
+        text = text_for_sentiment(
+            d.get("user_pov_summary"),
+            d.get("transcript_json"),
+            d.get("transcript"),
+        )
+        if not text:
+            return
+        async with sem:
+            res = await analyze_sentiment(text)
+        if not res:
+            return
+        label = res["sentiment"]
+        scores = res.get("scores")
+        await _persist_call_sentiment(d["id"], label, scores)
+        d["sentiment_label"] = label
+        d["sentiment_scores"] = scores or {}
+
+    await asyncio.gather(*[process_one(d) for d in items])
+    return items
 
 
 async def initiate_call(
@@ -373,6 +429,8 @@ async def get_calls_by_agent(
                 "transcript": call.transcript,
                 "transcript_json": call.transcript_json,
                 "user_pov_summary": call.user_pov_summary,
+                "sentiment_label": call.sentiment_label,
+                "sentiment_scores": call.sentiment_scores,
                 "started_at": call.started_at.isoformat() if call.started_at else None,
                 "answered_at": call.answered_at.isoformat() if call.answered_at else None,
                 "ended_at": call.ended_at.isoformat() if call.ended_at else None,
@@ -381,7 +439,8 @@ async def get_calls_by_agent(
             }
             for call in calls
         ]
-        
+
+        items = await enrich_calls_with_sentiment(items)
         return items, total
 
 
@@ -407,7 +466,7 @@ async def get_call_by_id(call_id: str, real_estate_agent_id: str) -> Optional[Di
         if not call:
             return None
         
-        return {
+        row = {
             "id": call.id,
             "voice_agent_id": call.voice_agent_id,
             "voice_agent_name": call.voice_agent.name if call.voice_agent else None,
@@ -427,12 +486,16 @@ async def get_call_by_id(call_id: str, real_estate_agent_id: str) -> Optional[Di
             "transcript": call.transcript,
             "transcript_json": call.transcript_json,
             "user_pov_summary": call.user_pov_summary,
+            "sentiment_label": call.sentiment_label,
+            "sentiment_scores": call.sentiment_scores,
             "started_at": call.started_at.isoformat() if call.started_at else None,
             "answered_at": call.answered_at.isoformat() if call.answered_at else None,
             "ended_at": call.ended_at.isoformat() if call.ended_at else None,
             "created_at": call.created_at.isoformat() if call.created_at else "",
             "updated_at": call.updated_at.isoformat() if call.updated_at else "",
         }
+        enriched = await enrich_calls_with_sentiment([row])
+        return enriched[0] if enriched else None
 
 
 async def update_call_status(
