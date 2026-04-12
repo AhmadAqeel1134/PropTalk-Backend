@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     SENDER_EMAIL_PASSWORD: Optional[str] = None
     SENDER_NAME: str = "PropTalk"
 
+    # ElevenLabs TTS — human-quality voice for the calling agent
+    ELEVENLABS_API_KEY: Optional[str] = None
+    ELEVENLABS_DEFAULT_VOICE_ID: str = "pNInz6obpgDQGcFmaJgB"   # "Adam" — warm male
+    ELEVENLABS_MODEL_ID: str = "eleven_turbo_v2_5"               # lowest-latency model
+
     class Config:
         env_file = ".env"
         case_sensitive = True

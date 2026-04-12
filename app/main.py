@@ -1,5 +1,5 @@
 from pathlib import Path
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -43,14 +43,14 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         start_time = time.time()
         client_ip = request.client.host if request.client else "unknown"
         
-        # Log incoming request
+        # Log incoming request (ASCII only — Windows cp1252 consoles break on emoji)
         print(f"\n{'='*70}")
-        print(f"🌐 INCOMING REQUEST")
+        print("INCOMING REQUEST")
         print(f"{'='*70}")
-        print(f"📍 Method: {request.method}")
-        print(f"📍 Path: {request.url.path}")
-        print(f"📍 Query: {request.url.query or 'None'}")
-        print(f"📍 Client IP: {client_ip}")
+        print(f"Method: {request.method}")
+        print(f"Path: {request.url.path}")
+        print(f"Query: {request.url.query or 'None'}")
+        print(f"Client IP: {client_ip}")
         
         # Log important headers only
         headers_to_log = {}
@@ -61,13 +61,13 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 else:
                     headers_to_log[header] = request.headers[header]
         if headers_to_log:
-            print(f"📍 Headers: {headers_to_log}")
+            print(f"Headers: {headers_to_log}")
         
         # For POST/PUT/PATCH, log that body exists (actual body will be logged in endpoint)
         if request.method in ["POST", "PUT", "PATCH"]:
             content_type = request.headers.get("content-type", "")
             content_length = request.headers.get("content-length", "unknown")
-            print(f"📍 Body: Content-Type={content_type}, Length={content_length}")
+            print(f"Body: Content-Type={content_type}, Length={content_length}")
         
         print(f"{'='*70}\n")
         logger.info(f"Request: {request.method} {request.url.path} from {client_ip}")
@@ -77,7 +77,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         
         # Log response
         process_time = time.time() - start_time
-        print(f"✅ Response: {response.status_code} ({process_time:.3f}s)\n")
+        print(f"Response: {response.status_code} ({process_time:.3f}s)\n")
         logger.info(f"Response: {response.status_code} for {request.method} {request.url.path} ({process_time:.3f}s)")
         
         return response
@@ -155,4 +155,29 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+
+# ── ElevenLabs TTS audio serving (for Twilio <Play> and browser preview) ──
+
+@app.get("/tts/preview/{token}")
+async def serve_preview_audio(token: str):
+    """Serve cached preview audio (non-destructive read for browser replay)."""
+    from app.services.elevenlabs_tts_service import peek_audio
+    audio = peek_audio(token)
+    if audio is None:
+        raise HTTPException(status_code=404, detail="Preview expired or not found")
+    return Response(content=audio, media_type="audio/mpeg")
+
+
+@app.get("/tts/{token}")
+async def serve_tts_audio(token: str):
+    """
+    Serve cached TTS audio. Twilio calls this URL inside <Play>.
+    Uses a non-destructive read so retries or duplicate fetches still work until cache TTL.
+    """
+    from app.services.elevenlabs_tts_service import peek_audio
+    audio = peek_audio(token)
+    if audio is None:
+        raise HTTPException(status_code=404, detail="Audio expired or not found")
+    return Response(content=audio, media_type="audio/mpeg")
 

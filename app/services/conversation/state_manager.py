@@ -194,7 +194,8 @@ def set_active_intent(call_sid: str, intent: str) -> bool:
     if not state:
         return False
     state["active_intent"] = intent
-    state["slots"] = {}
+    # Do not clear slots — extract_slots_from_text may have merged date_hint/time_hint
+    # before intent activates; clearing would lose them.
     state["pending_confirmation"] = False
     logger.debug(f"🎯 Set intent={intent} for call {call_sid}")
     return True
