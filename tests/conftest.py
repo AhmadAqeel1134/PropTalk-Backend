@@ -94,6 +94,7 @@ async def client(db_session):
         'app.services.admin_dashboard_service',
         'app.services.twilio_service.webhook_service',
         'app.services.phone_number_service',
+        'app.services.showing_service',
         'app.database.connection',
     ]
     

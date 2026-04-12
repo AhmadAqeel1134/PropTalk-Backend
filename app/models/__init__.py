@@ -8,6 +8,7 @@ from app.models.contact import Contact
 from app.models.voice_agent_request import VoiceAgentRequest
 from app.models.voice_agent import VoiceAgent
 from app.models.call import Call
+from app.models.showing import Showing
 
 __all__ = [
     "Admin",
@@ -19,4 +20,5 @@ __all__ = [
     "VoiceAgentRequest",
     "VoiceAgent",
     "Call",
+    "Showing",
 ]

@@ -3,13 +3,14 @@ Context Service - Build rich context for LLM responses
 Reads database to provide context, but performs NO writes
 """
 from typing import Dict, List, Optional
-from sqlalchemy import select, and_, or_
+from sqlalchemy import select, and_, or_, func as sa_func
 from sqlalchemy.orm import selectinload
 from app.database.connection import AsyncSessionLocal
 from app.models.contact import Contact
 from app.models.property import Property
 from app.models.voice_agent import VoiceAgent
 from app.models.real_estate_agent import RealEstateAgent
+from app.models.showing import Showing
 import logging
 
 logger = logging.getLogger(__name__)
@@ -54,9 +55,10 @@ async def build_outbound_context(
             properties_result = await session.execute(properties_stmt)
             properties = properties_result.scalars().all()
             
-            # Get voice agent
+            # Get voice agent (with its Twilio phone number for notifications)
             voice_agent_stmt = (
                 select(VoiceAgent)
+                .options(selectinload(VoiceAgent.phone_number))
                 .where(VoiceAgent.id == voice_agent_id)
             )
             voice_agent_result = await session.execute(voice_agent_stmt)
@@ -69,10 +71,11 @@ async def build_outbound_context(
             agent_result = await session.execute(agent_stmt)
             agent = agent_result.scalar_one_or_none()
             
-            # Format properties for context
+            # Format properties for context (include id for showing creation)
             properties_list = []
             for prop in properties:
                 prop_info = {
+                    "id": prop.id,
                     "address": prop.address,
                     "city": prop.city or "",
                     "state": prop.state or "",
@@ -113,8 +116,13 @@ async def build_outbound_context(
             else:
                 properties_text = "No properties linked to this contact."
             
+            va_twilio_phone = ""
+            if voice_agent and voice_agent.phone_number:
+                va_twilio_phone = voice_agent.phone_number.twilio_phone_number or ""
+
             context = {
                 "contact": {
+                    "id": contact.id,
                     "name": contact.name,
                     "phone_number": contact.phone_number,
                     "email": contact.email or "",
@@ -125,7 +133,8 @@ async def build_outbound_context(
                 "property_count": len(properties_list),
                 "voice_agent": {
                     "name": voice_agent.name if voice_agent else "Property Assistant",
-                    "system_prompt": voice_agent.system_prompt if voice_agent else ""
+                    "system_prompt": voice_agent.system_prompt if voice_agent else "",
+                    "phone_number": va_twilio_phone,
                 },
                 "real_estate_agent": {
                     "name": agent.full_name if agent else "",
@@ -134,7 +143,7 @@ async def build_outbound_context(
                 }
             }
             
-            logger.info(f"✅ Built outbound context for contact {contact_id} - {len(properties_list)} properties")
+            logger.info(f"✅ Built outbound context for contact {contact_id} - {len(properties_list)} properties, va_phone={va_twilio_phone}")
             return context
             
     except Exception as e:
@@ -155,9 +164,10 @@ async def build_inbound_context(
     """
     try:
         async with AsyncSessionLocal() as session:
-            # Get voice agent
+            # Get voice agent (with phone number for SMS notifications)
             voice_agent_stmt = (
                 select(VoiceAgent)
+                .options(selectinload(VoiceAgent.phone_number))
                 .where(VoiceAgent.id == voice_agent_id)
             )
             voice_agent_result = await session.execute(voice_agent_stmt)
@@ -257,28 +267,56 @@ async def build_inbound_context(
             else:
                 properties_summary = "No available properties at this time."
             
+            # Caller history — how many showings this caller already has
+            caller_history = None
+            if caller_contact:
+                showings_count_stmt = select(sa_func.count()).select_from(Showing).where(
+                    and_(
+                        Showing.real_estate_agent_id == real_estate_agent_id,
+                        Showing.contact_id == caller_contact.id,
+                    )
+                )
+                showings_count_result = await session.execute(showings_count_stmt)
+                past_showings = showings_count_result.scalar() or 0
+                caller_history = {
+                    "past_showings": past_showings,
+                    "is_returning": past_showings > 0,
+                }
+
+            caller_contact_dict = None
+            if caller_contact:
+                caller_contact_dict = {
+                    "id": caller_contact.id,
+                    "name": caller_contact.name,
+                    "phone_number": caller_contact.phone_number,
+                    "email": getattr(caller_contact, "email", None),
+                    "has_properties": len([p for p in properties_list if p.get("contact_id") == caller_contact.id]) > 0,
+                    "history": caller_history,
+                }
+
+            voice_agent_phone = ""
+            if voice_agent and voice_agent.phone_number:
+                voice_agent_phone = voice_agent.phone_number.twilio_phone_number or ""
+
             context = {
                 "voice_agent": {
                     "name": voice_agent.name if voice_agent else "Property Assistant",
-                    "system_prompt": voice_agent.system_prompt if voice_agent else ""
+                    "system_prompt": voice_agent.system_prompt if voice_agent else "",
+                    "phone_number": voice_agent_phone,
                 },
                 "real_estate_agent": {
                     "name": agent.full_name if agent else "",
-                    "company_name": agent.company_name or "Independent Agent" if agent else ""
+                    "company_name": agent.company_name or "Independent Agent" if agent else "",
                 },
                 "properties": properties_list,
                 "properties_summary": properties_summary,
                 "properties_by_type": properties_by_type,
                 "properties_by_city": properties_by_city,
                 "total_properties": len(properties_list),
-                "caller_contact": {
-                    "name": caller_contact.name,
-                    "phone_number": caller_contact.phone_number,
-                    "has_properties": len([p for p in properties_list if p.get('contact_id') == caller_contact.id]) > 0
-                } if caller_contact else None
+                "caller_contact": caller_contact_dict,
             }
-            
-            logger.info(f"✅ Built inbound context for agent {real_estate_agent_id} - {len(properties_list)} properties")
+
+            logger.info(f"✅ Built inbound context for agent {real_estate_agent_id} - {len(properties_list)} properties, caller_known={caller_contact is not None}")
             return context
             
     except Exception as e:

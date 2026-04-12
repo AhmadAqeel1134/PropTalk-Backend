@@ -31,7 +31,29 @@ from app.services.conversation.state_manager import (
     create_conversation_state,
     update_conversation_history,
     get_conversation_history,
-    clear_conversation_state
+    clear_conversation_state,
+    set_active_intent,
+    get_active_intent,
+    update_slots,
+    get_slots,
+    set_pending_confirmation,
+    is_pending_confirmation,
+    clear_intent,
+    set_caller_name,
+    get_caller_name,
+    set_caller_email,
+    get_caller_email,
+    mark_topic_confirmed,
+    get_confirmed_topics,
+    get_turn_count,
+    get_last_discussed_property,
+)
+from app.services.conversation.slot_parser import (
+    detect_scheduling_intent,
+    extract_slots_from_text,
+    resolve_datetime,
+    extract_caller_name,
+    extract_caller_email,
 )
 from app.services.ai.context_service import (
     build_outbound_context,
@@ -39,12 +61,15 @@ from app.services.ai.context_service import (
 )
 from app.services.ai.prompt_service import (
     build_outbound_prompt,
+    build_outbound_booking_prompt,
     build_inbound_prompt,
-    get_initial_greeting_prompt
+    build_booking_prompt,
+    get_initial_greeting_prompt,
 )
 from app.services.ai.llm_service import (
     process_with_llm,
-    generate_initial_greeting
+    process_with_structured_output,
+    generate_initial_greeting,
 )
 from app.services.call_service import save_transcript_by_twilio_sid
 
@@ -54,6 +79,12 @@ logger = logging.getLogger(__name__)
 _phone_cache = {}
 _cache_timestamp = datetime.utcnow()
 
+# Deferred speech store for two-phase typing-sound redirect pattern.
+# Key: CallSid → {"speech": str, "ts": datetime}
+_deferred_speech: Dict[str, Dict] = {}
+
+FILLER_SOUND_PATH = "/assets/typing.wav"
+
 
 def _should_end_call(user_input: str, llm_response: str, conversation_state: Optional[Dict], is_outbound: bool) -> bool:
     """
@@ -62,13 +93,14 @@ def _should_end_call(user_input: str, llm_response: str, conversation_state: Opt
     """
     user_lower = user_input.lower()
     llm_lower = llm_response.lower()
+    turn_count = conversation_state.get("turn_count", 0) if conversation_state else 0
     
     # Check if user says they're not the right person (outbound only)
     if is_outbound:
-        # Patterns indicating wrong person
-        # Check for simple "no" first (most common response to verification question)
-        if user_lower.strip() == "no" or user_lower.strip() == "no.":
-            logger.info(f"🛑 User said 'no' to verification question: '{user_input}'")
+        # Bare "no" only ends the call in the first 2 turns (identity verification stage).
+        # After that, "no" is a normal conversational answer (e.g., "no more questions").
+        if turn_count <= 2 and user_lower.strip() in ("no", "no."):
+            logger.info(f"🛑 User said 'no' to verification question (turn {turn_count}): '{user_input}'")
             return True
         
         wrong_person_patterns = [
@@ -111,15 +143,18 @@ def _should_end_call(user_input: str, llm_response: str, conversation_state: Opt
                 logger.info(f"🛑 User indicated not interested: '{user_input}'")
                 return True  # End call but with different message (handled by LLM)
     
+    # Normalize commas/periods out of user input for more reliable matching
+    user_normalized = user_lower.replace(",", "").replace(".", "").strip()
+
     # Check if user says no questions / ready to end (works for both inbound and outbound)
     no_questions_patterns = [
         "no questions",
         "no question",
-        "no, that's all",
         "no that's all",
+        "no thats all",
         "no i'm good",
         "no im good",
-        "no, i'm done",
+        "no i'm done",
         "no im done",
         "that's all",
         "thats all",
@@ -127,7 +162,6 @@ def _should_end_call(user_input: str, llm_response: str, conversation_state: Opt
         "no other questions",
         "nothing else",
         "no nothing",
-        "no, nothing",
         "no thanks",
         "no thank you",
         "i'm all set",
@@ -137,11 +171,43 @@ def _should_end_call(user_input: str, llm_response: str, conversation_state: Opt
         "i'll call later",
         "ill call later",
         "not interested",
-        "not right now"
+        "not right now",
+        "end the call",
+        "end this call",
+        "just end the call",
+        "just end this call",
+        "just end it",
+        "hang up",
+        "please end",
+        "stop the call",
+        "cut the call",
     ]
     for pattern in no_questions_patterns:
-        if pattern in user_lower:
+        if pattern in user_lower or pattern in user_normalized:
             logger.info(f"🛑 User indicated no more questions: '{user_input}'")
+            return True
+
+    # Context-aware: if the last agent message asked "anything else?" / "other questions?"
+    # then a bare "no" or "no." should end the call.
+    if user_normalized in ("no", "no thank you", "nope", "nah"):
+        history = conversation_state.get("history", []) if conversation_state else []
+        last_agent_msg = ""
+        for msg in reversed(history):
+            if msg.get("role") == "assistant":
+                last_agent_msg = (msg.get("content") or "").lower()
+                break
+        wrap_up_cues = [
+            "anything else",
+            "any other question",
+            "any other queries",
+            "anything more",
+            "anything you'd like",
+            "something else",
+            "other questions",
+            "is there anything",
+        ]
+        if any(cue in last_agent_msg for cue in wrap_up_cues):
+            logger.info(f"🛑 Bare 'no' after wrap-up question — ending call")
             return True
     
     # Check if LLM response indicates ending (apology + goodbye)
@@ -404,15 +470,42 @@ async def handle_voice_webhook(form_data: Dict) -> str:
         # ============================================================
         
         response = VoiceResponse()
+        _agent_reply = ""  # collected below; spoken inside <Gather> for barge-in
         webhook_base_url = settings.TWILIO_VOICE_WEBHOOK_URL or ""
         voice_webhook_url = f"{webhook_base_url}/webhooks/twilio/voice" if webhook_base_url else "/webhooks/twilio/voice"
         
-        # Check if user spoke (continuation) or initial call
+        # ============================================================
+        # TYPING-SOUND TWO-PHASE REDIRECT
+        # Phase 1: speech arrives → store it, play typing sound, redirect
+        # Phase 2: redirect arrives (no speech) → retrieve stored speech, process with LLM
+        # ============================================================
+        deferred = _deferred_speech.pop(call_sid, None)
+        if deferred:
+            speech_result = deferred["speech"]
+            logger.info(f"🔄 Phase 2 — retrieved deferred speech for {call_sid}: '{speech_result[:40]}...'")
+
         is_continuation = bool(speech_result and speech_result.strip())
-        
+
+        # Phase 1: fresh speech → defer and play typing filler ONLY when the agent
+        # is actively collecting structured info (booking, email, etc.), not on
+        # every casual exchange.
+        _conv_state_check = get_conversation_state(call_sid)
+        _use_typing_filler = False
+        if _conv_state_check:
+            _active = _conv_state_check.get("active_intent")
+            _use_typing_filler = _active in ("schedule_showing", "collect_email")
+
+        if is_continuation and not deferred and _use_typing_filler:
+            _deferred_speech[call_sid] = {"speech": speech_result, "ts": datetime.utcnow()}
+            filler_url = f"{webhook_base_url}{FILLER_SOUND_PATH}" if webhook_base_url else FILLER_SOUND_PATH
+            response.play(filler_url)
+            response.redirect(voice_webhook_url, method="POST")
+            logger.info(f"⌨️ Phase 1 — playing typing filler, redirecting for {call_sid}")
+            return str(response)
+
         if is_continuation:
             # ============================================================
-            # USER SPOKE - Process with LLM
+            # USER SPOKE - Process with LLM (Phase 2 or first-turn fallback)
             # ============================================================
             logger.info(f"💬 User spoke: '{speech_result}' (full text captured by Twilio STT)")
             print(f"\n{'='*60}")
@@ -425,14 +518,17 @@ async def handle_voice_webhook(form_data: Dict) -> str:
             conversation_state = get_conversation_state(call_sid)
             
             if not conversation_state:
-                # First user response - create state quickly
+                # First user response - create state quickly.
+                # Outbound: caller_phone = to_number (the lead we called)
+                # Inbound: caller_phone = from_number (the person calling us)
                 conversation_state = create_conversation_state(
                     call_sid=call_sid,
                     direction="outbound" if is_outbound else "inbound",
                     context={},
                     voice_agent_id=voice_agent_id,
                     real_estate_agent_id=real_estate_agent_id,
-                    contact_id=None
+                    contact_id=None,
+                    caller_phone=to_number if is_outbound else from_number,
                 )
             
             # Add user message
@@ -441,51 +537,189 @@ async def handle_voice_webhook(form_data: Dict) -> str:
             
             # Get context (may be empty if still building in background)
             context = conversation_state.get("context", {})
-            
+
+            # --- Booking intent detection (works for BOTH inbound and outbound) ---
+            active_intent = get_active_intent(call_sid)
+            scheduling_keywords = ["meet", "meeting", "physical", "in person", "in-person",
+                                   "come over", "come by", "drop by", "stop by", "see the place",
+                                   "visit the property", "visit the place", "look at it"]
+            if not active_intent and (
+                detect_scheduling_intent(speech_result)
+                or any(kw in speech_result.lower() for kw in scheduling_keywords)
+            ):
+                set_active_intent(call_sid, "schedule_showing")
+                active_intent = "schedule_showing"
+                logger.info(f"🎯 Booking intent detected for call {call_sid} (outbound={is_outbound})")
+
+                # Pre-populate known slots so the LLM doesn't re-ask for info we already have
+                pre_slots = {}
+                contact_data = context.get("contact") or context.get("caller_contact") or {}
+                props = context.get("properties_list") or context.get("properties", [])
+
+                if contact_data.get("name") and not get_slots(call_sid).get("caller_name"):
+                    pre_slots["caller_name"] = contact_data["name"]
+                if contact_data.get("email") and not get_slots(call_sid).get("caller_email"):
+                    pre_slots["caller_email"] = contact_data["email"]
+
+                # Auto-set property_address when there's only one property in context
+                if props and len(props) == 1 and not get_slots(call_sid).get("property_address"):
+                    p = props[0]
+                    addr_parts = [p.get("address", "")]
+                    if p.get("city"):
+                        addr_parts.append(p["city"])
+                    pre_slots["property_address"] = ", ".join(filter(None, addr_parts))
+                    pre_slots["property_id"] = p.get("id")
+
+                # For inbound: try matching last discussed property
+                if not pre_slots.get("property_id") and not is_outbound:
+                    ldp = get_last_discussed_property(call_sid)
+                    if ldp and isinstance(ldp, dict) and ldp.get("id"):
+                        pre_slots["property_id"] = ldp["id"]
+                        addr_parts = [ldp.get("address", "")]
+                        if ldp.get("city"):
+                            addr_parts.append(ldp["city"])
+                        pre_slots["property_address"] = ", ".join(filter(None, addr_parts))
+
+                if pre_slots:
+                    update_slots(call_sid, pre_slots)
+                    logger.info(f"📋 Pre-populated slots from context: {list(pre_slots.keys())}")
+
+            # Pre-extract slots from user text (cheap, no LLM needed)
+            if active_intent == "schedule_showing":
+                properties_list = context.get("properties_list") or context.get("properties", [])
+                heuristic_slots = extract_slots_from_text(speech_result, properties_list)
+                if heuristic_slots:
+                    update_slots(call_sid, heuristic_slots)
+
+            use_structured = active_intent == "schedule_showing"
+
             # Build system prompt
+            confirmed = get_confirmed_topics(call_sid)
             if context and not context.get("error"):
-                if is_outbound:
-                    from app.services.ai.prompt_service import build_outbound_prompt
-                    system_prompt = build_outbound_prompt(context)
+                if is_outbound and use_structured:
+                    system_prompt = build_outbound_booking_prompt(context, get_slots(call_sid), confirmed)
+                elif is_outbound:
+                    system_prompt = build_outbound_prompt(context, confirmed)
+                elif use_structured:
+                    system_prompt = build_booking_prompt(context, get_slots(call_sid))
                 else:
-                    from app.services.ai.prompt_service import build_inbound_prompt
                     system_prompt = build_inbound_prompt(context)
             else:
-                # Fallback prompt
                 system_prompt = f"You are {voice_agent_name}, a helpful real estate assistant. Be professional and concise."
-            
+
             # Get LLM response with timeout (using Gemini)
             try:
-                llm_response = await asyncio.wait_for(
-                    process_with_llm(
-                        user_input=speech_result,
-                        system_prompt=system_prompt,
-                        conversation_history=history,
-                        max_tokens=150,  # Gemini allows more tokens
-                        timeout=4.0  # Slightly longer for Gemini
-                    ),
-                    timeout=3.5  # Overall timeout
-                )
-                
+                if use_structured:
+                    structured = await asyncio.wait_for(
+                        process_with_structured_output(
+                            user_input=speech_result,
+                            system_prompt=system_prompt,
+                            conversation_history=history,
+                            max_tokens=250,
+                            timeout=5.0,
+                        ),
+                        timeout=5.5,
+                    )
+                    llm_response = structured.get("assistant_speech", "")
+                    action = structured.get("action")
+                    new_slots = structured.get("slots") or {}
+
+                    logger.info(
+                        f"🔧 STRUCTURED OUTPUT  |  call={call_sid}  |  "
+                        f"action={action!r}  slots={new_slots}  |  "
+                        f"speech={llm_response[:80]}..."
+                    )
+
+                    if new_slots:
+                        update_slots(call_sid, new_slots)
+
+                    # Persist caller_name into state + auto-upsert contact
+                    extracted_name = new_slots.get("caller_name")
+                    extracted_email = new_slots.get("caller_email")
+
+                    if extracted_name and not get_caller_name(call_sid):
+                        set_caller_name(call_sid, extracted_name)
+                    if extracted_email and not get_caller_email(call_sid):
+                        set_caller_email(call_sid, extracted_email)
+
+                    if extracted_name or extracted_email:
+                        asyncio.ensure_future(
+                            _upsert_caller_contact_bg(
+                                conversation_state.get("real_estate_agent_id"),
+                                conversation_state.get("caller_phone") or new_slots.get("caller_phone"),
+                                extracted_name or get_caller_name(call_sid),
+                                extracted_email or get_caller_email(call_sid),
+                            )
+                        )
+
+                    if action == "create_showing":
+                        all_slots = get_slots(call_sid)
+                        logger.info(f"🚀 CREATE_SHOWING triggered  |  call={call_sid}  |  all_slots={all_slots}")
+                        asyncio.ensure_future(
+                            _persist_showing_and_notify(
+                                call_sid, conversation_state, all_slots
+                            )
+                        )
+                        clear_intent(call_sid)
+                else:
+                    llm_response = await asyncio.wait_for(
+                        process_with_llm(
+                            user_input=speech_result,
+                            system_prompt=system_prompt,
+                            conversation_history=history,
+                            max_tokens=150,
+                            timeout=4.0,
+                        ),
+                        timeout=3.5,
+                    )
+
+                # Detect caller name & email from user speech (lightweight, no LLM cost)
+                if not is_outbound:
+                    detected_name = extract_caller_name(speech_result) if not get_caller_name(call_sid) else None
+                    detected_email = extract_caller_email(speech_result) if not get_caller_email(call_sid) else None
+
+                    if detected_name:
+                        set_caller_name(call_sid, detected_name)
+                        logger.info(f"👤 Detected caller name: {detected_name}")
+                    if detected_email:
+                        set_caller_email(call_sid, detected_email)
+                        logger.info(f"📧 Detected caller email: {detected_email}")
+
+                    if detected_name or detected_email:
+                        asyncio.ensure_future(
+                            _upsert_caller_contact_bg(
+                                conversation_state.get("real_estate_agent_id"),
+                                conversation_state.get("caller_phone"),
+                                detected_name or get_caller_name(call_sid),
+                                detected_email or get_caller_email(call_sid),
+                            )
+                        )
+
                 update_conversation_history(call_sid, "assistant", llm_response)
-                response.say(llm_response, voice="alice")
+                _agent_reply = llm_response
                 logger.info(f"✅ LLM: {llm_response[:50]}...")
-                
+
+                # Auto-detect confirmed topics for outbound calls
+                if is_outbound:
+                    _auto_confirm_topics(call_sid, speech_result, llm_response)
+
                 # Check if we should end the call (wrong person, no questions, or LLM indicates ending)
                 if _should_end_call(speech_result, llm_response, conversation_state, is_outbound):
                     logger.info(f"🛑 Ending call based on user input or LLM response")
+                    response.say(llm_response, voice="alice")
                     response.hangup()
                     return str(response)
                 
             except asyncio.TimeoutError:
                 logger.warning("⏱️ LLM timeout, using natural fallback")
                 fallback = _generate_natural_fallback(speech_result, conversation_state, is_outbound)
-                response.say(fallback, voice="alice")
+                _agent_reply = fallback
                 update_conversation_history(call_sid, "assistant", fallback)
                 
                 # Check if we should end the call even with fallback
                 if _should_end_call(speech_result, fallback, conversation_state, is_outbound):
                     logger.info(f"🛑 Ending call based on user input (timeout fallback)")
+                    response.say(fallback, voice="alice")
                     response.hangup()
                     return str(response)
                 
@@ -512,12 +746,13 @@ async def handle_voice_webhook(form_data: Dict) -> str:
                     logger.warning(f"⚠️ LLM error (non-quota): {error_str[:100]}")
                     fallback = _generate_natural_fallback(speech_result, conversation_state, is_outbound)
                 
-                response.say(fallback, voice="alice")
+                _agent_reply = fallback
                 update_conversation_history(call_sid, "assistant", fallback)
                 
                 # Check if we should end the call even with fallback
                 if _should_end_call(speech_result, fallback, conversation_state, is_outbound):
                     logger.info(f"🛑 Ending call based on user input (error fallback)")
+                    response.say(fallback, voice="alice")
                     response.hangup()
                     return str(response)
                 
@@ -541,7 +776,7 @@ async def handle_voice_webhook(form_data: Dict) -> str:
                     f"Hello, are you there? This is {voice_agent_name}"
                     f"{f', calling for {contact_name}' if contact_name else ''}."
                 )
-                response.say(check_in, voice="alice")
+                _agent_reply = check_in
                 logger.info(f"🔁 Silence detected, sending check-in instead of repeating greeting: '{check_in}'")
             else:
                 # ============================================================
@@ -769,7 +1004,8 @@ async def handle_voice_webhook(form_data: Dict) -> str:
                             context={},
                             voice_agent_id=voice_agent_id,
                             real_estate_agent_id=real_estate_agent_id,
-                            contact_id=None
+                            contact_id=None,
+                            caller_phone=to_number if is_outbound else from_number,
                         )
                         logger.info(f"✅ Conversation state created for call {call_sid}")
                     except Exception as state_error:
@@ -787,18 +1023,20 @@ async def handle_voice_webhook(form_data: Dict) -> str:
                         logger.warning(f"⚠️ Failed to update conversation history: {history_error}")
                         # Continue anyway - history update is not critical
                 
-                response.say(greeting, voice="alice")
+                _agent_reply = greeting
                 logger.info(f"✅ Added greeting to TwiML: {greeting[:50]}...")
         
-        # Always gather speech
+        # Gather with Say inside → enables barge-in (user can interrupt agent)
         gather = Gather(
             input="speech",
             action=voice_webhook_url,
             method="POST",
             timeout=5,
             speech_timeout="auto",
-            language="en-US"
+            language="en-US",
         )
+        if _agent_reply:
+            gather.say(_agent_reply, voice="alice")
         response.append(gather)
         
         # If no speech, redirect
@@ -808,9 +1046,13 @@ async def handle_voice_webhook(form_data: Dict) -> str:
         # PHASE 3: BACKGROUND TASKS (Non-blocking)
         # ============================================================
         
-        # Log response time
-        elapsed = (datetime.utcnow() - start_time).total_seconds()
-        logger.info(f"⚡ Response generated in {elapsed:.3f}s")
+        # Structured latency log
+        elapsed_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
+        intent_tag = get_active_intent(call_sid) or "none"
+        logger.info(
+            f"⚡ LATENCY call={call_sid} intent={intent_tag} "
+            f"total={elapsed_ms:.0f}ms is_continuation={is_continuation}"
+        )
             
         # Schedule background tasks (don't wait)
         asyncio.create_task(_background_tasks(
@@ -978,13 +1220,61 @@ async def _build_context_background(
         # Update state with full context
         if context:
             conversation_state["context"] = context
-            conversation_state["contact_id"] = contact_id
-            logger.info(f"✅ Full context built for {call_sid} - Contact: {contact_id}")
+
+            # Populate contact info from context.
+            # Outbound uses "contact" (the lead we called); inbound uses "caller_contact".
+            contact_data = context.get("contact") or context.get("caller_contact") or {}
+            if contact_data:
+                conversation_state["contact_id"] = contact_data.get("id") or contact_id
+                if contact_data.get("name") and not conversation_state.get("caller_name"):
+                    conversation_state["caller_name"] = contact_data["name"]
+                if contact_data.get("email") and not conversation_state.get("caller_email"):
+                    conversation_state["caller_email"] = contact_data["email"]
+                if contact_data.get("phone_number") and not conversation_state.get("caller_phone"):
+                    conversation_state["caller_phone"] = contact_data["phone_number"]
+            else:
+                conversation_state["contact_id"] = contact_id
+
+            logger.info(
+                f"✅ Full context built for {call_sid} - "
+                f"Contact: {conversation_state.get('contact_id')}, "
+                f"CallerName: {conversation_state.get('caller_name')}, "
+                f"CallerPhone: {conversation_state.get('caller_phone')}, "
+                f"CallerEmail: {conversation_state.get('caller_email')}"
+            )
         else:
             logger.warning(f"⚠️ Context building returned None for {call_sid}")
                     
     except Exception as e:
         logger.error(f"❌ Context building error for {call_sid}: {e}", exc_info=True)
+
+
+def _auto_confirm_topics(call_sid: str, user_input: str, llm_response: str) -> None:
+    """
+    Lightweight detection: if the user confirmed a topic that the LLM was asking
+    about, mark it so the prompt won't repeat it next turn.
+    """
+    user_lower = user_input.lower()
+    llm_lower = llm_response.lower()
+    affirmatives = ("yes", "yeah", "correct", "that's right", "right", "yep", "sure", "exactly")
+
+    is_affirm = any(a in user_lower for a in affirmatives)
+
+    if is_affirm or "thank you for confirming" in llm_lower:
+        turn = get_turn_count(call_sid)
+        if turn <= 2:
+            mark_topic_confirmed(call_sid, "identity_verified")
+        if any(w in llm_lower for w in ("bedroom", "bathroom", "square feet", "property at")):
+            mark_topic_confirmed(call_sid, "property_details_confirmed")
+
+    if any(w in llm_lower for w in ("condition", "repairs", "state of the property")):
+        mark_topic_confirmed(call_sid, "condition_asked")
+
+    if any(w in llm_lower for w in ("interested in selling", "looking to sell")):
+        mark_topic_confirmed(call_sid, "selling_interest_asked")
+
+    if any(w in llm_lower for w in ("asking price", "price in mind", "bottom line")):
+        mark_topic_confirmed(call_sid, "price_asked")
 
 
 def _generate_error_twiml(message: str) -> str:
@@ -1144,6 +1434,179 @@ async def handle_status_webhook(form_data: Dict) -> None:
             
     except Exception as e:
         logger.error(f"❌ Status webhook error: {e}", exc_info=True)
+
+
+async def _persist_showing_and_notify(
+    call_sid: str, conversation_state: Dict, slots: Dict
+) -> None:
+    """
+    Fire-and-forget: persist showing in DB, then send SMS + email confirmations.
+    Runs AFTER TwiML is returned so it never blocks the voice response.
+    """
+    try:
+        from app.services.showing_service import create_showing
+        from app.services.conversation.slot_parser import resolve_datetime
+        from app.services.notification_service import send_showing_sms, send_showing_email
+
+        agent_id = conversation_state.get("real_estate_agent_id")
+        voice_agent_id = conversation_state.get("voice_agent_id")
+        if not agent_id:
+            logger.warning("Cannot persist showing — missing agent_id")
+            return
+
+        date_hint = slots.get("date") or slots.get("date_hint")
+        time_hint = slots.get("time") or slots.get("time_hint")
+        scheduled = resolve_datetime(date_hint, time_hint)
+        if not scheduled:
+            logger.warning(f"Cannot persist showing — unresolvable datetime: date={date_hint}, time={time_hint}")
+            return
+
+        property_id = slots.get("property_id")
+        context = conversation_state.get("context", {})
+        props = context.get("properties_list") or context.get("properties", [])
+
+        if not property_id and slots.get("property_index") is not None:
+            idx = slots["property_index"]
+            if isinstance(idx, int) and 0 <= idx < len(props):
+                property_id = props[idx].get("id")
+
+        # For outbound calls with a single property, auto-populate property_id
+        if not property_id and props and len(props) == 1:
+            property_id = props[0].get("id")
+        # Also try last_discussed_property from state (it's a dict with an "id" key)
+        if not property_id:
+            ldp = conversation_state.get("last_discussed_property")
+            if isinstance(ldp, dict):
+                property_id = ldp.get("id")
+            elif isinstance(ldp, str):
+                property_id = ldp
+
+        caller_phone = slots.get("caller_phone") or conversation_state.get("caller_phone")
+        caller_name = slots.get("caller_name") or get_caller_name(call_sid)
+        caller_email = (
+            slots.get("caller_email")
+            or get_caller_email(call_sid)
+            or conversation_state.get("caller_email")
+            or (context.get("caller_contact") or {}).get("email")
+            or (context.get("contact") or {}).get("email")
+        )
+
+        logger.info(
+            f"🔎 PERSIST DEBUG  |  call={call_sid}  direction={conversation_state.get('direction')}  |  "
+            f"caller_phone={caller_phone!r}  caller_name={caller_name!r}  caller_email={caller_email!r}  |  "
+            f"property_id={property_id!r}  scheduled={scheduled}  |  "
+            f"slots.caller_email={slots.get('caller_email')!r}  "
+            f"state.caller_email={conversation_state.get('caller_email')!r}  "
+            f"context.contact.email={(context.get('contact') or {}).get('email')!r}  "
+            f"context.caller_contact.email={(context.get('caller_contact') or {}).get('email')!r}"
+        )
+
+        # DB insert — non-fatal: if it fails (e.g. time conflict), we still send notifications
+        try:
+            await create_showing(
+                real_estate_agent_id=agent_id,
+                scheduled_start=scheduled,
+                property_id=property_id,
+                contact_id=conversation_state.get("contact_id"),
+                caller_phone=caller_phone,
+                caller_name=caller_name,
+                visit_type=slots.get("visit_type", "property_visit"),
+                source="voice_outbound" if conversation_state.get("direction") == "outbound" else "voice_inbound",
+                voice_agent_id=voice_agent_id,
+                call_id=None,
+                twilio_call_sid=call_sid,
+                notes=slots.get("notes"),
+            )
+            logger.info(f"✅ Showing persisted for call {call_sid}")
+        except Exception as show_err:
+            logger.warning(f"⚠️ Showing DB insert failed (notifications will still be sent): {show_err}")
+
+        # --- Build notification payload (runs regardless of DB outcome) ---
+        agent_info = context.get("real_estate_agent", {})
+        voice_info = context.get("voice_agent", {})
+        agent_name = agent_info.get("name", "Your Agent")
+        company_name = agent_info.get("company_name", "")
+
+        property_address = slots.get("property_address", "")
+        if not property_address and property_id and props:
+            for p in props:
+                if p.get("id") == property_id:
+                    addr_parts = [p.get("address", "")]
+                    if p.get("city"):
+                        addr_parts.append(p["city"])
+                    if p.get("state"):
+                        addr_parts.append(p["state"])
+                    property_address = ", ".join(filter(None, addr_parts))
+                    break
+        # Fallback: if only one property in context, use it
+        if not property_address and props and len(props) == 1:
+            p = props[0]
+            addr_parts = [p.get("address", "")]
+            if p.get("city"):
+                addr_parts.append(p["city"])
+            property_address = ", ".join(filter(None, addr_parts))
+
+        notif_data = {
+            "caller_name": caller_name,
+            "property_address": property_address,
+            "scheduled_start": scheduled.isoformat() if scheduled else "",
+            "visit_type": slots.get("visit_type", "showing"),
+            "status": "requested",
+        }
+
+        # SMS — send from the voice agent's own Twilio number
+        va_phone = voice_info.get("phone_number")
+        logger.info(
+            f"📨 NOTIFY DEBUG  |  call={call_sid}  |  "
+            f"va_phone={va_phone!r}  caller_phone={caller_phone!r}  caller_email={caller_email!r}  |  "
+            f"voice_agent_context={voice_info}  |  "
+            f"notif_data={notif_data}"
+        )
+        if caller_phone and va_phone:
+            await send_showing_sms(
+                to_phone=caller_phone,
+                from_phone=va_phone,
+                showing=notif_data,
+                agent_name=agent_name,
+                company_name=company_name,
+            )
+        else:
+            logger.warning(f"⚠️ SMS skipped — caller_phone={caller_phone}, va_phone={va_phone}")
+
+        # Email — only if we have a recipient address
+        if caller_email:
+            await send_showing_email(
+                to_email=caller_email,
+                showing=notif_data,
+                agent_name=agent_name,
+                company_name=company_name,
+            )
+        else:
+            logger.info(f"📧 Email skipped — no caller email for call {call_sid}")
+
+    except Exception as e:
+        logger.error(f"❌ Failed to persist/notify showing for {call_sid}: {e}", exc_info=True)
+
+
+async def _upsert_caller_contact_bg(
+    real_estate_agent_id: Optional[str],
+    caller_phone: Optional[str],
+    caller_name: Optional[str] = None,
+    caller_email: Optional[str] = None,
+) -> None:
+    """Fire-and-forget: create or update a contact record for the caller."""
+    if not real_estate_agent_id or not caller_phone:
+        return
+    try:
+        from app.services.contact_upsert_service import upsert_caller_contact
+        await upsert_caller_contact(
+            real_estate_agent_id=real_estate_agent_id,
+            caller_phone=caller_phone,
+            caller_name=caller_name,
+            caller_email=caller_email,
+        )
+    except Exception as e:
+        logger.error(f"❌ Background contact upsert failed: {e}", exc_info=True)
 
 
 async def handle_recording_webhook(form_data: Dict) -> None:
