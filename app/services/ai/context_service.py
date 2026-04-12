@@ -120,6 +120,10 @@ async def build_outbound_context(
             if voice_agent and voice_agent.phone_number:
                 va_twilio_phone = voice_agent.phone_number.twilio_phone_number or ""
 
+            va_settings = {}
+            if voice_agent and voice_agent.settings:
+                va_settings = voice_agent.settings if isinstance(voice_agent.settings, dict) else {}
+
             context = {
                 "contact": {
                     "id": contact.id,
@@ -135,6 +139,7 @@ async def build_outbound_context(
                     "name": voice_agent.name if voice_agent else "Property Assistant",
                     "system_prompt": voice_agent.system_prompt if voice_agent else "",
                     "phone_number": va_twilio_phone,
+                    "settings": va_settings,
                 },
                 "real_estate_agent": {
                     "name": agent.full_name if agent else "",
@@ -298,11 +303,16 @@ async def build_inbound_context(
             if voice_agent and voice_agent.phone_number:
                 voice_agent_phone = voice_agent.phone_number.twilio_phone_number or ""
 
+            va_settings = {}
+            if voice_agent and voice_agent.settings:
+                va_settings = voice_agent.settings if isinstance(voice_agent.settings, dict) else {}
+
             context = {
                 "voice_agent": {
                     "name": voice_agent.name if voice_agent else "Property Assistant",
                     "system_prompt": voice_agent.system_prompt if voice_agent else "",
                     "phone_number": voice_agent_phone,
+                    "settings": va_settings,
                 },
                 "real_estate_agent": {
                     "name": agent.full_name if agent else "",

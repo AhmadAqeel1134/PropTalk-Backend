@@ -356,10 +356,10 @@ async def update_voice_agent(real_estate_agent_id: str, update_data: Dict) -> Di
             voice_agent.system_prompt = update_data["system_prompt"]
         
         if "settings" in update_data and update_data["settings"]:
-            # Merge settings
-            current_settings = voice_agent.settings or {}
-            current_settings.update(update_data["settings"])
-            voice_agent.settings = current_settings
+            # Merge into a NEW dict — in-place JSON mutation is not detected by SQLAlchemy
+            # and would not persist (elevenlabs_voice_id etc. appeared to "save" only in memory).
+            merged = {**(voice_agent.settings or {}), **update_data["settings"]}
+            voice_agent.settings = merged
         
         await session.commit()
         await session.refresh(voice_agent)

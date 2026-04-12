@@ -91,30 +91,27 @@ async def twilio_voice_webhook(request: Request):
         
         logger.info(f"🔔 Twilio voice webhook - CallSid: {call_sid}, From: {from_number}, To: {to_number}, Status: {call_status}")
         
-        # Process webhook with timeout protection
-        # Twilio expects response within 3 seconds, so we'll timeout after 2.5 seconds
+        # Process webhook with timeout protection.
+        # Budget: LLM (~1-1.5s) + ElevenLabs TTS (~1s) + network headroom.
+        # Twilio itself only gives up after ~15s, so 8s is safe.
         print("⏳ Calling handle_voice_webhook...")
         try:
             twiml_response = await asyncio.wait_for(
                 handle_voice_webhook(form_dict),
-                timeout=2.5
+                timeout=8.0
             )
             print("✅ handle_voice_webhook completed successfully")
             logger.info(f"✅ Returning TwiML response (length: {len(twiml_response)} bytes)")
             print(f"✅ TwiML response generated: {len(twiml_response)} bytes")
             print(f"📄 TwiML preview: {twiml_response[:200]}...")
         except asyncio.TimeoutError:
-            logger.error("⏱️ Webhook processing timed out (>2.5s), returning fallback response")
-            print("⏱️ TIMEOUT: Processing took too long, using fallback")
+            logger.error("⏱️ Webhook processing timed out (>8s), returning silent redirect fallback")
+            print("⏱️ TIMEOUT: Processing took too long, using silent redirect fallback")
             from twilio.twiml.voice_response import VoiceResponse
             from app.config import settings
             response = VoiceResponse()
-            direction = form_dict.get("Direction", "")
-            if direction.startswith("outbound"):
-                response.say("One moment please, I'm still here.", voice="alice")
-            else:
-                response.say("Please hold on a moment.", voice="alice")
             webhook_url = f"{settings.TWILIO_VOICE_WEBHOOK_URL}/webhooks/twilio/voice" if settings.TWILIO_VOICE_WEBHOOK_URL else "/webhooks/twilio/voice"
+            # Silent redirect — no Say here so the user doesn't hear Twilio Alice
             response.redirect(webhook_url, method="POST")
             twiml_response = str(response)
         

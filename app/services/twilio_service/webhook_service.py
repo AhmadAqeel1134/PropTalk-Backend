@@ -86,6 +86,101 @@ _deferred_speech: Dict[str, Dict] = {}
 FILLER_SOUND_PATH = "/assets/typing.wav"
 
 
+def _prepopulate_booking_slots_from_context(
+    call_sid: str, context: Dict, is_outbound: bool
+) -> None:
+    """Copy contact / single-property / last-discussed hints into booking slots."""
+    pre_slots: Dict = {}
+    contact_data = context.get("contact") or context.get("caller_contact") or {}
+    props = context.get("properties_list") or context.get("properties", [])
+
+    if contact_data.get("name") and not get_slots(call_sid).get("caller_name"):
+        pre_slots["caller_name"] = contact_data["name"]
+    if contact_data.get("email") and not get_slots(call_sid).get("caller_email"):
+        pre_slots["caller_email"] = contact_data["email"]
+
+    if props and len(props) == 1 and not get_slots(call_sid).get("property_address"):
+        p = props[0]
+        addr_parts = [p.get("address", "")]
+        if p.get("city"):
+            addr_parts.append(p["city"])
+        pre_slots["property_address"] = ", ".join(filter(None, addr_parts))
+        pre_slots["property_id"] = p.get("id")
+
+    if not pre_slots.get("property_id") and not is_outbound:
+        ldp = get_last_discussed_property(call_sid)
+        if ldp and isinstance(ldp, dict) and ldp.get("id"):
+            pre_slots["property_id"] = ldp["id"]
+            addr_parts = [ldp.get("address", "")]
+            if ldp.get("city"):
+                addr_parts.append(ldp["city"])
+            pre_slots["property_address"] = ", ".join(filter(None, addr_parts))
+
+    if pre_slots:
+        update_slots(call_sid, pre_slots)
+        logger.info(f"📋 Pre-populated booking slots from context: {list(pre_slots.keys())}")
+
+
+async def _tts_or_say(element, text: str, base_url: str, voice_settings: Optional[Dict] = None):
+    """
+    Speak with the agent's chosen ElevenLabs voice only.
+
+    Uses ``voice_settings.elevenlabs_voice_id`` from the real-estate agent's Voice Studio
+    selection — never the server default voice for live calls.
+
+    Falls back to Twilio ``<Say voice="alice">`` only when: ElevenLabs is disabled, no
+    voice id is configured, synthesis fails, or there is no ``TWILIO_VOICE_WEBHOOK_URL``
+    (needed for Twilio to ``<Play>`` the audio URL).
+    """
+    from app.services.elevenlabs_tts_service import synthesize_speech, is_enabled
+
+    if not text or not str(text).strip():
+        return
+
+    if not is_enabled():
+        element.say(text, voice="alice")
+        return
+
+    raw_id = (voice_settings or {}).get("elevenlabs_voice_id")
+    voice_id = str(raw_id).strip() if raw_id is not None else ""
+    if not voice_id:
+        logger.info("No elevenlabs_voice_id in agent settings; using Twilio Say for this utterance")
+        element.say(text, voice="alice")
+        return
+
+    speed = 1.0
+    stability = 0.5
+    similarity = 0.75
+    if voice_settings:
+        speed = voice_settings.get("elevenlabs_speed", 1.0)
+        stability = voice_settings.get("elevenlabs_stability", 0.5)
+        similarity = voice_settings.get("elevenlabs_similarity_boost", 0.75)
+
+    if not (base_url or "").strip():
+        logger.warning("TWILIO_VOICE_WEBHOOK_URL unset; cannot <Play> TTS URL, using Twilio Say")
+        element.say(text, voice="alice")
+        return
+
+    tts = await synthesize_speech(
+        text=text,
+        voice_id=voice_id,
+        speed=speed,
+        stability=stability,
+        similarity_boost=similarity,
+        allow_env_default_voice=False,
+    )
+    if tts.token:
+        play_url = f"{base_url.rstrip('/')}/tts/{tts.token}"
+        element.play(play_url)
+        return
+
+    logger.warning(
+        "ElevenLabs TTS failed (%s); using Twilio Say",
+        tts.error_message or tts.error_http_status or "unknown",
+    )
+    element.say(text, voice="alice")
+
+
 def _should_end_call(user_input: str, llm_response: str, conversation_state: Optional[Dict], is_outbound: bool) -> bool:
     """
     Determine if the call should be ended based on user input or LLM response.
@@ -387,6 +482,7 @@ async def handle_voice_webhook(form_data: Dict) -> str:
         voice_agent_id = None
         voice_agent_name = None
         real_estate_agent_id = None
+        voice_agent_settings: Dict = {}
         
         # Try cache first
         cached_data = _get_cached_phone_data(twilio_number)
@@ -396,6 +492,7 @@ async def handle_voice_webhook(form_data: Dict) -> str:
             voice_agent_id = cached_data.get("voice_agent_id")
             voice_agent_name = cached_data.get("voice_agent_name")
             real_estate_agent_id = cached_data.get("real_estate_agent_id")
+            voice_agent_settings = cached_data.get("voice_agent_settings") or {}
         else:
             # Database lookup - single optimized query
             try:
@@ -409,8 +506,15 @@ async def handle_voice_webhook(form_data: Dict) -> str:
                     from sqlalchemy.orm import aliased
                     va_alias = aliased(VoiceAgent)
                     stmt = (
-                        select(PhoneNumber.id, PhoneNumber.is_active, 
-                               va_alias.id, va_alias.name, va_alias.status, va_alias.real_estate_agent_id)
+                        select(
+                            PhoneNumber.id,
+                            PhoneNumber.is_active,
+                            va_alias.id,
+                            va_alias.name,
+                            va_alias.status,
+                            va_alias.real_estate_agent_id,
+                            va_alias.settings,
+                        )
                         .outerjoin(va_alias, PhoneNumber.id == va_alias.phone_number_id)
                         .where(PhoneNumber.twilio_phone_number == normalized_number)
                     )
@@ -428,7 +532,7 @@ async def handle_voice_webhook(form_data: Dict) -> str:
                         logger.error(f"🔍 Sample phone numbers in DB: {debug_numbers}")
                         return _generate_error_twiml("The voice agent is not available.")
                     
-                    phone_id, is_active, agent_id, agent_name, agent_status, re_agent_id = row
+                    phone_id, is_active, agent_id, agent_name, agent_status, re_agent_id, va_settings = row
                     
                     logger.info(f"✅ Found phone_id={phone_id}, is_active={is_active}, agent_id={agent_id}, agent_name={agent_name}, agent_status={agent_status}")
                     
@@ -440,11 +544,13 @@ async def handle_voice_webhook(form_data: Dict) -> str:
                     voice_agent_id = agent_id
                     voice_agent_name = agent_name
                     real_estate_agent_id = re_agent_id
+                    voice_agent_settings = va_settings if isinstance(va_settings, dict) else {}
                     
                     _cache_phone_data(twilio_number, {
                         "voice_agent_id": agent_id,
                         "voice_agent_name": agent_name,
-                        "real_estate_agent_id": re_agent_id
+                        "real_estate_agent_id": re_agent_id,
+                        "voice_agent_settings": voice_agent_settings,
                     })
                     
                     logger.info(f"✅ Found agent: {agent_name} (ID: {agent_id})")
@@ -473,6 +579,9 @@ async def handle_voice_webhook(form_data: Dict) -> str:
         _agent_reply = ""  # collected below; spoken inside <Gather> for barge-in
         webhook_base_url = settings.TWILIO_VOICE_WEBHOOK_URL or ""
         voice_webhook_url = f"{webhook_base_url}/webhooks/twilio/voice" if webhook_base_url else "/webhooks/twilio/voice"
+
+        # ElevenLabs voice settings — from DB/cache on first leg; context on continuations
+        _va_settings: Dict = dict(voice_agent_settings)
         
         # ============================================================
         # TYPING-SOUND TWO-PHASE REDIRECT
@@ -530,6 +639,11 @@ async def handle_voice_webhook(form_data: Dict) -> str:
                     contact_id=None,
                     caller_phone=to_number if is_outbound else from_number,
                 )
+
+            # Our Twilio voice number on this leg (SMS "from" when context is still loading)
+            conversation_state["twilio_messaging_from"] = (
+                from_number if is_outbound else to_number
+            )
             
             # Add user message
             update_conversation_history(call_sid, "user", speech_result)
@@ -538,58 +652,43 @@ async def handle_voice_webhook(form_data: Dict) -> str:
             # Get context (may be empty if still building in background)
             context = conversation_state.get("context", {})
 
-            # --- Booking intent detection (works for BOTH inbound and outbound) ---
+            # ElevenLabs settings: prefer enriched context; else DB/cache from phase 1
+            _ctx_va = (context.get("voice_agent") or {}).get("settings") or {}
+            _va_settings = _ctx_va if _ctx_va else dict(voice_agent_settings)
+
+            # --- Booking intent + slot hints (works for BOTH inbound and outbound) ---
             active_intent = get_active_intent(call_sid)
-            scheduling_keywords = ["meet", "meeting", "physical", "in person", "in-person",
-                                   "come over", "come by", "drop by", "stop by", "see the place",
-                                   "visit the property", "visit the place", "look at it"]
+            properties_list = context.get("properties_list") or context.get("properties", [])
+
+            # Always merge cheap speech-derived slots (date/time/visit_type) — even before intent,
+            # so "Monday" + "2 p.m." across turns accumulates and can activate booking mode.
+            heuristic_slots = extract_slots_from_text(speech_result, properties_list or None)
+            if heuristic_slots:
+                update_slots(call_sid, heuristic_slots)
+
+            scheduling_keywords = [
+                "meet", "meeting", "physical", "in person", "in-person",
+                "come over", "come by", "drop by", "stop by", "see the place",
+                "visit the property", "visit the place", "look at it",
+            ]
             if not active_intent and (
                 detect_scheduling_intent(speech_result)
                 or any(kw in speech_result.lower() for kw in scheduling_keywords)
             ):
                 set_active_intent(call_sid, "schedule_showing")
                 active_intent = "schedule_showing"
-                logger.info(f"🎯 Booking intent detected for call {call_sid} (outbound={is_outbound})")
+                logger.info(f"🎯 Booking intent detected (keywords) for call {call_sid} (outbound={is_outbound})")
+                _prepopulate_booking_slots_from_context(call_sid, context, is_outbound)
 
-                # Pre-populate known slots so the LLM doesn't re-ask for info we already have
-                pre_slots = {}
-                contact_data = context.get("contact") or context.get("caller_contact") or {}
-                props = context.get("properties_list") or context.get("properties", [])
-
-                if contact_data.get("name") and not get_slots(call_sid).get("caller_name"):
-                    pre_slots["caller_name"] = contact_data["name"]
-                if contact_data.get("email") and not get_slots(call_sid).get("caller_email"):
-                    pre_slots["caller_email"] = contact_data["email"]
-
-                # Auto-set property_address when there's only one property in context
-                if props and len(props) == 1 and not get_slots(call_sid).get("property_address"):
-                    p = props[0]
-                    addr_parts = [p.get("address", "")]
-                    if p.get("city"):
-                        addr_parts.append(p["city"])
-                    pre_slots["property_address"] = ", ".join(filter(None, addr_parts))
-                    pre_slots["property_id"] = p.get("id")
-
-                # For inbound: try matching last discussed property
-                if not pre_slots.get("property_id") and not is_outbound:
-                    ldp = get_last_discussed_property(call_sid)
-                    if ldp and isinstance(ldp, dict) and ldp.get("id"):
-                        pre_slots["property_id"] = ldp["id"]
-                        addr_parts = [ldp.get("address", "")]
-                        if ldp.get("city"):
-                            addr_parts.append(ldp["city"])
-                        pre_slots["property_address"] = ", ".join(filter(None, addr_parts))
-
-                if pre_slots:
-                    update_slots(call_sid, pre_slots)
-                    logger.info(f"📋 Pre-populated slots from context: {list(pre_slots.keys())}")
-
-            # Pre-extract slots from user text (cheap, no LLM needed)
-            if active_intent == "schedule_showing":
-                properties_list = context.get("properties_list") or context.get("properties", [])
-                heuristic_slots = extract_slots_from_text(speech_result, properties_list)
-                if heuristic_slots:
-                    update_slots(call_sid, heuristic_slots)
+            if not active_intent:
+                s = get_slots(call_sid)
+                if s.get("date_hint") and s.get("time_hint"):
+                    set_active_intent(call_sid, "schedule_showing")
+                    active_intent = "schedule_showing"
+                    logger.info(
+                        f"🎯 Booking intent from accumulated date+time slots for call {call_sid}"
+                    )
+                    _prepopulate_booking_slots_from_context(call_sid, context, is_outbound)
 
             use_structured = active_intent == "schedule_showing"
 
@@ -615,10 +714,10 @@ async def handle_voice_webhook(form_data: Dict) -> str:
                             user_input=speech_result,
                             system_prompt=system_prompt,
                             conversation_history=history,
-                            max_tokens=250,
-                            timeout=5.0,
+                            max_tokens=200,
+                            timeout=4.0,
                         ),
-                        timeout=5.5,
+                        timeout=4.5,
                     )
                     llm_response = structured.get("assistant_speech", "")
                     action = structured.get("action")
@@ -667,10 +766,10 @@ async def handle_voice_webhook(form_data: Dict) -> str:
                             user_input=speech_result,
                             system_prompt=system_prompt,
                             conversation_history=history,
-                            max_tokens=150,
-                            timeout=4.0,
+                            max_tokens=120,
+                            timeout=3.5,
                         ),
-                        timeout=3.5,
+                        timeout=4.0,
                     )
 
                 # Detect caller name & email from user speech (lightweight, no LLM cost)
@@ -706,7 +805,7 @@ async def handle_voice_webhook(form_data: Dict) -> str:
                 # Check if we should end the call (wrong person, no questions, or LLM indicates ending)
                 if _should_end_call(speech_result, llm_response, conversation_state, is_outbound):
                     logger.info(f"🛑 Ending call based on user input or LLM response")
-                    response.say(llm_response, voice="alice")
+                    await _tts_or_say(response, llm_response, webhook_base_url, _va_settings)
                     response.hangup()
                     return str(response)
                 
@@ -719,7 +818,7 @@ async def handle_voice_webhook(form_data: Dict) -> str:
                 # Check if we should end the call even with fallback
                 if _should_end_call(speech_result, fallback, conversation_state, is_outbound):
                     logger.info(f"🛑 Ending call based on user input (timeout fallback)")
-                    response.say(fallback, voice="alice")
+                    await _tts_or_say(response, fallback, webhook_base_url, _va_settings)
                     response.hangup()
                     return str(response)
                 
@@ -752,7 +851,7 @@ async def handle_voice_webhook(form_data: Dict) -> str:
                 # Check if we should end the call even with fallback
                 if _should_end_call(speech_result, fallback, conversation_state, is_outbound):
                     logger.info(f"🛑 Ending call based on user input (error fallback)")
-                    response.say(fallback, voice="alice")
+                    await _tts_or_say(response, fallback, webhook_base_url, _va_settings)
                     response.hangup()
                     return str(response)
                 
@@ -765,6 +864,10 @@ async def handle_voice_webhook(form_data: Dict) -> str:
             existing_state = get_conversation_state(call_sid)
             if existing_state:
                 context = existing_state.get("context", {}) or {}
+
+                _ctx_va = (context.get("voice_agent") or {}).get("settings") or {}
+                _va_settings = _ctx_va if _ctx_va else dict(voice_agent_settings)
+
                 contact_name = ""
                 try:
                     contact_ctx = context.get("contact") or {}
@@ -943,11 +1046,11 @@ async def handle_voice_webhook(form_data: Dict) -> str:
                         # Get greeting prompt with context
                         greeting_prompt = get_initial_greeting_prompt(greeting_context, "outbound")
                         
-                        # Generate greeting with LLM (with short timeout to stay under 3s total)
+                        # Greeting LLM — budget fits under webhook_controller wait_for (~8s) with TTS after
                         logger.info(f"🤖 Generating greeting with LLM...")
                         greeting = await asyncio.wait_for(
-                            generate_initial_greeting(greeting_prompt, timeout=2.0),
-                            timeout=2.5
+                            generate_initial_greeting(greeting_prompt, timeout=4.5),
+                            timeout=5.0,
                         )
                         logger.info(f"✅ LLM generated greeting: {greeting[:50]}...")
                         
@@ -1036,7 +1139,7 @@ async def handle_voice_webhook(form_data: Dict) -> str:
             language="en-US",
         )
         if _agent_reply:
-            gather.say(_agent_reply, voice="alice")
+            await _tts_or_say(gather, _agent_reply, webhook_base_url, _va_settings)
         response.append(gather)
         
         # If no speech, redirect
@@ -1050,7 +1153,7 @@ async def handle_voice_webhook(form_data: Dict) -> str:
         elapsed_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
         intent_tag = get_active_intent(call_sid) or "none"
         logger.info(
-            f"⚡ LATENCY call={call_sid} intent={intent_tag} "
+            f"⚡ LATENCY call={call_sid} active_intent={intent_tag} "
             f"total={elapsed_ms:.0f}ms is_continuation={is_continuation}"
         )
             
@@ -1278,7 +1381,7 @@ def _auto_confirm_topics(call_sid: str, user_input: str, llm_response: str) -> N
 
 
 def _generate_error_twiml(message: str) -> str:
-    """Generate error TwiML response"""
+    """Generate error TwiML response (sync — uses Twilio Say since this is error path)."""
     response = VoiceResponse()
     response.say(f"Sorry, {message}", voice="alice")
     response.hangup()
@@ -1555,7 +1658,9 @@ async def _persist_showing_and_notify(
         }
 
         # SMS — send from the voice agent's own Twilio number
-        va_phone = voice_info.get("phone_number")
+        va_phone = voice_info.get("phone_number") or conversation_state.get(
+            "twilio_messaging_from"
+        )
         logger.info(
             f"📨 NOTIFY DEBUG  |  call={call_sid}  |  "
             f"va_phone={va_phone!r}  caller_phone={caller_phone!r}  caller_email={caller_email!r}  |  "

@@ -23,9 +23,14 @@ from app.services.voice_agent_service import (
     get_all_voice_agents
 )
 from app.utils.dependencies import get_current_real_estate_agent_id, get_current_admin_id
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/agent/voice-agent", tags=["Voice Agent"])
+
+DEFAULT_PREVIEW_TEXT = (
+    "Hi, I'm calling on behalf of your real estate agent about a property you listed. "
+    "Do you have a moment to chat?"
+)
 
 
 # Agent Endpoints
@@ -106,4 +111,74 @@ async def toggle_voice_agent_status_endpoint(
         )
 
 
+# ── ElevenLabs Voice Preview ──
+
+class VoicePreviewRequest(BaseModel):
+    voice_id: str
+    text: Optional[str] = Field(default=None, max_length=500)
+    speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    stability: float = Field(default=0.5, ge=0.0, le=1.0)
+    similarity_boost: float = Field(default=0.75, ge=0.0, le=1.0)
+
+
+@router.post("/voice/preview")
+async def preview_voice(
+    body: VoicePreviewRequest,
+    agent_id: str = Depends(get_current_real_estate_agent_id),
+):
+    """
+    Generate a short TTS sample for browser preview.
+    Returns a token URL the frontend can use in an <audio> element.
+    """
+    from app.services.elevenlabs_tts_service import (
+        synthesize_speech,
+        is_enabled,
+        get_tts_cache_ttl_seconds,
+    )
+    from app.config import settings as app_settings
+
+    if not is_enabled():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="ElevenLabs is not configured. Add ELEVENLABS_API_KEY to server settings.",
+        )
+
+    sample_text = body.text or DEFAULT_PREVIEW_TEXT
+    tts = await synthesize_speech(
+        text=sample_text,
+        voice_id=body.voice_id,
+        speed=body.speed,
+        stability=body.stability,
+        similarity_boost=body.similarity_boost,
+    )
+    if not tts.token:
+        msg = tts.error_message or "Failed to generate voice preview."
+        # ElevenLabs free tier: library voices often return 402 paid_plan_required
+        if tts.error_http_status == 402:
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                detail=msg,
+            )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=msg,
+        )
+
+    base_url = app_settings.TWILIO_VOICE_WEBHOOK_URL or ""
+    preview_url = f"{base_url}/tts/preview/{tts.token}" if base_url else f"/tts/preview/{tts.token}"
+
+    return {
+        "preview_url": preview_url,
+        "token": tts.token,
+        "expires_in": get_tts_cache_ttl_seconds(),
+    }
+
+
+@router.get("/voice/status")
+async def voice_tts_status(
+    agent_id: str = Depends(get_current_real_estate_agent_id),
+):
+    """Check if ElevenLabs TTS is configured and available."""
+    from app.services.elevenlabs_tts_service import is_enabled
+    return {"enabled": is_enabled()}
 

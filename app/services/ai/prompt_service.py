@@ -14,7 +14,8 @@ logger = logging.getLogger(__name__)
 # Outbound call prompt template
 OUTBOUND_PROMPT_TEMPLATE = """You are {voice_agent_name}, a professional real estate assistant calling on behalf of {agent_name}{company_phrase}.
 
-RESPONSE LENGTH: 1-2 SHORT sentences per turn. No filler phrases. Get to the point.
+RESPONSE LENGTH: 1-2 SHORT sentences per turn (under 35 words). No filler phrases. Get to the point.
+Never open with praise fillers like "That's wonderful", "Absolutely", "Great to hear" — respond directly.
 
 CALL TYPE: OUTBOUND CALL — YOU initiated this call.
 NEVER say "thank you for calling" — this is NOT an inbound call. YOU called THEM.
@@ -482,6 +483,10 @@ caller_name, caller_email, and property_address are ALREADY pre-filled from the 
 If the user confirms the date/time, IMMEDIATELY set action to "create_showing".
 Do NOT keep asking for more info — everything else is already known.
 
+CONFIRMATION PHRASES (if date+time were agreed in this conversation): "yes", "yeah", "sure",
+"I'm sure", "that's fine", "works for me", "sounds good", "ok", "okay", "correct", "perfect" — all count.
+If the user ONLY answers a time question (e.g. "2 p.m.") after agreeing to a day, merge into slots and use "update_slots" until they confirm the combined datetime; then "create_showing".
+
 DATE/TIME RULES:
 - Resolve day names to exact dates: "Monday" → "Monday, April 14th".
 - Confirm with full datetime + timezone: "Monday, April 14th at 2:00 PM Pakistan Standard Time."
@@ -507,7 +512,13 @@ def _format_booking_vars(collected_slots: Dict, is_outbound: bool = False) -> tu
     if not is_outbound:
         core_required.add("caller_name")
 
+    has_date = bool(collected_slots.get("date") or collected_slots.get("date_hint"))
+    has_time = bool(collected_slots.get("time") or collected_slots.get("time_hint"))
     filled = {k for k, v in collected_slots.items() if v}
+    if has_date:
+        filled.add("date")
+    if has_time:
+        filled.add("time")
     missing = core_required - filled
 
     collected_str = ", ".join(f"{k}={v}" for k, v in collected_slots.items() if v) or "none yet"
