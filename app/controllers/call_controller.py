@@ -3,7 +3,6 @@ Call Controller - API endpoints for call management
 """
 import logging
 import httpx
-import base64
 from fastapi import APIRouter, HTTPException, Depends, status, Query, Request, Response
 from typing import Optional, List, Dict
 from app.schemas.call import (
@@ -19,7 +18,8 @@ from app.services.call_service import (
     initiate_call,
     initiate_batch_calls,
     get_calls_by_agent,
-    get_call_by_id
+    get_call_by_id,
+    fetch_twilio_recording_bytes,
 )
 from app.services.call_statistics_service import get_call_statistics
 from app.utils.dependencies import get_current_real_estate_agent_id, get_current_admin_id
@@ -235,59 +235,34 @@ async def stream_call_recording(
             detail="Twilio credentials not configured"
         )
     
-    # Create Basic Auth header for Twilio
-    credentials = f"{settings.TWILIO_ACCOUNT_SID}:{settings.TWILIO_AUTH_TOKEN}"
-    encoded_credentials = base64.b64encode(credentials.encode()).decode()
-    auth_header = f"Basic {encoded_credentials}"
-    
     try:
-        # Twilio recording URLs might need .mp3 extension for proper format
-        # If URL doesn't end with .mp3 or .wav, try adding .mp3
-        twilio_url = recording_url
-        if not twilio_url.endswith(('.mp3', '.wav', '.m4a')):
-            # Check if it's a Twilio API URL and append .mp3
-            if 'api.twilio.com' in twilio_url and '/Recordings/' in twilio_url:
-                twilio_url = f"{recording_url}.mp3"
-        
-        # Fetch recording from Twilio with authentication
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                twilio_url,
-                headers={
-                    "Authorization": auth_header,
-                    "Accept": "audio/mpeg, audio/mp3, */*"
-                },
-                timeout=30.0,
-                follow_redirects=True
+        content, content_type = await fetch_twilio_recording_bytes(recording_url)
+        return Response(
+            content=content,
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="recording_{call_id}.mp3"',
+                "Cache-Control": "public, max-age=3600",
+                "Accept-Ranges": "bytes",
+            },
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
+    except RuntimeError as e:
+        logger.error(f"Failed to fetch recording from Twilio: {e}")
+        msg = str(e)
+        if "401" in msg or "403" in msg:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Recording access denied by Twilio. Verify TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN.",
             )
-            
-            if response.status_code != 200:
-                logger.error(f"Failed to fetch recording from Twilio: {response.status_code} - {response.text}")
-                if response.status_code in (401, 403):
-                    raise HTTPException(
-                        status_code=status.HTTP_502_BAD_GATEWAY,
-                        detail="Recording access denied by Twilio. Verify TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN."
-                    )
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail=f"Failed to fetch recording from Twilio (status {response.status_code})"
-                )
-            
-            # Determine content type from response
-            content_type = response.headers.get("content-type", "audio/mpeg")
-            if "audio" not in content_type:
-                content_type = "audio/mpeg"
-            
-            # Stream the response
-            return Response(
-                content=response.content,
-                media_type=content_type,
-                headers={
-                    "Content-Disposition": f'attachment; filename="recording_{call_id}.mp3"',
-                    "Cache-Control": "public, max-age=3600",
-                    "Accept-Ranges": "bytes"
-                }
-            )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=msg,
+        )
     except httpx.TimeoutException:
         logger.error(f"Timeout fetching recording from Twilio for call {call_id}")
         raise HTTPException(
@@ -384,7 +359,11 @@ async def get_conversation_history_endpoint(
     transcript = call.get("transcript")
     if transcript:
         # Parse transcript into messages (simple heuristic)
-        parsed_messages = _parse_transcript_to_messages(transcript, call.get("direction", "outbound"))
+        from app.utils.transcript_parse import parse_transcript_to_messages
+
+        parsed_messages = parse_transcript_to_messages(
+            transcript, call.get("direction", "outbound")
+        )
         return {
             "history": parsed_messages,
             "source": "parsed"
@@ -394,44 +373,5 @@ async def get_conversation_history_endpoint(
         "history": [],
         "source": "none"
     }
-
-
-def _parse_transcript_to_messages(transcript: str, direction: str) -> List[Dict]:
-    """
-    Parse plain text transcript into structured messages
-    This is a heuristic approach - assumes alternating user/agent messages
-    """
-    import re
-    messages = []
-    
-    # Split by common patterns (periods, question marks, newlines)
-    # This is a simple heuristic - can be improved
-    sentences = re.split(r'[.!?]\s+|\n+', transcript.strip())
-    sentences = [s.strip() for s in sentences if s.strip()]
-    
-    # Alternate between user and agent
-    # For outbound: agent speaks first, then user, then agent...
-    # For inbound: user might speak first, then agent...
-    is_agent_turn = direction == "outbound"  # Outbound calls start with agent greeting
-    
-    for i, sentence in enumerate(sentences):
-        if not sentence:
-            continue
-        
-        # Skip very short sentences (likely artifacts)
-        if len(sentence) < 3:
-            continue
-        
-        role = "assistant" if is_agent_turn else "user"
-        messages.append({
-            "role": role,
-            "content": sentence,
-            "timestamp": None  # We don't have timestamps from plain text
-        })
-        
-        is_agent_turn = not is_agent_turn
-    
-    return messages
-
 
 

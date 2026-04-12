@@ -20,6 +20,7 @@ from app.controllers.voice_agent_controller import router as voice_agent_router
 from app.controllers.call_controller import router as call_router
 from app.controllers.showing_controller import router as showing_router
 from app.controllers.twilio_controller.webhook_controller import router as webhook_router
+from app.controllers.end_user_controller import router as end_user_router
 import logging
 import time
 
@@ -141,6 +142,7 @@ app.include_router(voice_agent_router)
 app.include_router(call_router)
 app.include_router(showing_router)
 app.include_router(webhook_router)
+app.include_router(end_user_router)
 
 _assets_dir = Path(__file__).resolve().parent.parent / "assets"
 if _assets_dir.is_dir():
