@@ -3,7 +3,7 @@ Conversation State Manager
 Manages conversation state, history, and context caching
 In-memory storage for fast access (can be migrated to Redis later)
 """
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 from datetime import datetime, timedelta
 import logging
 
@@ -43,11 +43,22 @@ def create_conversation_state(
     context: Dict,
     voice_agent_id: str,
     real_estate_agent_id: str,
-    contact_id: Optional[str] = None
+    contact_id: Optional[str] = None,
+    caller_phone: Optional[str] = None,
 ) -> Dict:
     """
     Create a new conversation state
     """
+    # Pre-fill caller info from context if the caller is a known contact
+    known_name = None
+    known_email = None
+    caller_contact = context.get("caller_contact") if context else None
+    if caller_contact:
+        if caller_contact.get("name"):
+            known_name = caller_contact["name"]
+        if caller_contact.get("email"):
+            known_email = caller_contact["email"]
+
     state = {
         "call_sid": call_sid,
         "direction": direction,  # "inbound" or "outbound"
@@ -55,10 +66,19 @@ def create_conversation_state(
         "history": [],  # Conversation history for LLM
         "voice_agent_id": voice_agent_id,
         "real_estate_agent_id": real_estate_agent_id,
-        "contact_id": contact_id,  # For outbound calls
+        "contact_id": contact_id or (caller_contact.get("id") if caller_contact else None),
+        "caller_phone": caller_phone,
+        "caller_name": known_name,
+        "caller_email": known_email,
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
-        "turn_count": 0
+        "turn_count": 0,
+        # Booking / intent tracking
+        "active_intent": None,  # e.g. "schedule_showing"
+        "slots": {},            # collected booking fields
+        "pending_confirmation": False,
+        # Topic tracking — prevents the agent from repeating confirmed topics
+        "confirmed_topics": set(),
     }
     
     _conversation_states[call_sid] = state
@@ -164,3 +184,137 @@ def get_state_stats() -> Dict:
             "outbound": len([s for s in _conversation_states.values() if s.get("direction") == "outbound"])
         }
     }
+
+
+# --------------- intent / slot helpers ---------------
+
+def set_active_intent(call_sid: str, intent: str) -> bool:
+    """Set the active intent for the call (e.g. 'schedule_showing')."""
+    state = get_conversation_state(call_sid)
+    if not state:
+        return False
+    state["active_intent"] = intent
+    state["slots"] = {}
+    state["pending_confirmation"] = False
+    logger.debug(f"🎯 Set intent={intent} for call {call_sid}")
+    return True
+
+
+def get_active_intent(call_sid: str) -> Optional[str]:
+    state = get_conversation_state(call_sid)
+    return state.get("active_intent") if state else None
+
+
+def update_slots(call_sid: str, new_slots: Dict) -> bool:
+    """Merge new slot values into the existing slots dict."""
+    state = get_conversation_state(call_sid)
+    if not state:
+        return False
+    state["slots"].update(new_slots)
+    state["updated_at"] = datetime.utcnow()
+    logger.debug(f"📝 Slots updated for call {call_sid}: {list(new_slots.keys())}")
+    return True
+
+
+def get_slots(call_sid: str) -> Dict:
+    state = get_conversation_state(call_sid)
+    return state.get("slots", {}) if state else {}
+
+
+def set_pending_confirmation(call_sid: str, pending: bool) -> bool:
+    state = get_conversation_state(call_sid)
+    if not state:
+        return False
+    state["pending_confirmation"] = pending
+    return True
+
+
+def is_pending_confirmation(call_sid: str) -> bool:
+    state = get_conversation_state(call_sid)
+    return state.get("pending_confirmation", False) if state else False
+
+
+def clear_intent(call_sid: str) -> bool:
+    """Reset intent tracking after completion or cancellation."""
+    state = get_conversation_state(call_sid)
+    if not state:
+        return False
+    state["active_intent"] = None
+    state["slots"] = {}
+    state["pending_confirmation"] = False
+    return True
+
+
+# --------------- personalization helpers ---------------
+
+def set_caller_name(call_sid: str, name: str) -> bool:
+    """Store the caller's name for personalised responses throughout the call."""
+    state = get_conversation_state(call_sid)
+    if not state:
+        return False
+    state["caller_name"] = name
+    if state.get("slots") is not None:
+        state["slots"]["caller_name"] = name
+    return True
+
+
+def get_caller_name(call_sid: str) -> Optional[str]:
+    state = get_conversation_state(call_sid)
+    if not state:
+        return None
+    return state.get("caller_name") or (state.get("slots") or {}).get("caller_name")
+
+
+def set_caller_email(call_sid: str, email: str) -> bool:
+    """Store the caller's email so notifications work end-to-end."""
+    state = get_conversation_state(call_sid)
+    if not state:
+        return False
+    state["caller_email"] = email
+    if state.get("slots") is not None:
+        state["slots"]["caller_email"] = email
+    return True
+
+
+def get_caller_email(call_sid: str) -> Optional[str]:
+    state = get_conversation_state(call_sid)
+    if not state:
+        return None
+    return state.get("caller_email") or (state.get("slots") or {}).get("caller_email")
+
+
+def set_last_discussed_property(call_sid: str, property_info: Dict) -> bool:
+    """Track the most-recently discussed property so 'that one' / 'tell me more' can resolve."""
+    state = get_conversation_state(call_sid)
+    if not state:
+        return False
+    state["last_discussed_property"] = property_info
+    return True
+
+
+def get_last_discussed_property(call_sid: str) -> Optional[Dict]:
+    state = get_conversation_state(call_sid)
+    return state.get("last_discussed_property") if state else None
+
+
+# --------------- topic tracking helpers ---------------
+
+def mark_topic_confirmed(call_sid: str, topic: str) -> bool:
+    """Mark a conversation topic as confirmed so the agent does not repeat it."""
+    state = get_conversation_state(call_sid)
+    if not state:
+        return False
+    state["confirmed_topics"].add(topic)
+    logger.debug(f"✅ Topic confirmed for call {call_sid}: {topic}")
+    return True
+
+
+def get_confirmed_topics(call_sid: str) -> Set[str]:
+    state = get_conversation_state(call_sid)
+    return state.get("confirmed_topics", set()) if state else set()
+
+
+def get_turn_count(call_sid: str) -> int:
+    """Return the number of user turns so far (useful for early-call logic)."""
+    state = get_conversation_state(call_sid)
+    return state.get("turn_count", 0) if state else 0

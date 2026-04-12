@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     SENTIMENT_SERVICE_URL: str = "https://zayan0978-proptalk-sentiment.hf.space"
     SENTIMENT_REQUEST_TIMEOUT_SECONDS: float = 60.0
 
+    # Email (SMTP) — used for showing confirmations
+    SMTP_HOST: Optional[str] = None
+    SMTP_PORT: int = 587
+    SENDER_EMAIL: Optional[str] = None
+    SENDER_EMAIL_PASSWORD: Optional[str] = None
+    SENDER_NAME: str = "PropTalk"
+
     class Config:
         env_file = ".env"
         case_sensitive = True

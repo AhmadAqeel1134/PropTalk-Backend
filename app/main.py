@@ -1,5 +1,7 @@
+from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
 from sqlalchemy import text
@@ -16,9 +18,21 @@ from app.controllers.real_estate_agent.property_controller import router as agen
 from app.controllers.real_estate_agent.profile_controller import router as agent_profile_router
 from app.controllers.voice_agent_controller import router as voice_agent_router
 from app.controllers.call_controller import router as call_router
+from app.controllers.showing_controller import router as showing_router
 from app.controllers.twilio_controller.webhook_controller import router as webhook_router
 import logging
 import time
+
+# Configure root logger so ALL logger.info() calls in services actually output to console
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+    datefmt="%H:%M:%S",
+)
+# Quiet down noisy third-party loggers
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("hpack").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +139,12 @@ app.include_router(agent_property_router)
 app.include_router(agent_profile_router)
 app.include_router(voice_agent_router)
 app.include_router(call_router)
+app.include_router(showing_router)
 app.include_router(webhook_router)
+
+_assets_dir = Path(__file__).resolve().parent.parent / "assets"
+if _assets_dir.is_dir():
+    app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="assets")
 
 
 @app.get("/")

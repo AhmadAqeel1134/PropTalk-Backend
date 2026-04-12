@@ -106,12 +106,14 @@ async def twilio_voice_webhook(request: Request):
         except asyncio.TimeoutError:
             logger.error("⏱️ Webhook processing timed out (>2.5s), returning fallback response")
             print("⏱️ TIMEOUT: Processing took too long, using fallback")
-            # Return a simple fallback response
             from twilio.twiml.voice_response import VoiceResponse
-            response = VoiceResponse()
-            response.say("Hello, thank you for calling. Please hold.", voice="alice")
-            # Use full URL if available, otherwise relative
             from app.config import settings
+            response = VoiceResponse()
+            direction = form_dict.get("Direction", "")
+            if direction.startswith("outbound"):
+                response.say("One moment please, I'm still here.", voice="alice")
+            else:
+                response.say("Please hold on a moment.", voice="alice")
             webhook_url = f"{settings.TWILIO_VOICE_WEBHOOK_URL}/webhooks/twilio/voice" if settings.TWILIO_VOICE_WEBHOOK_URL else "/webhooks/twilio/voice"
             response.redirect(webhook_url, method="POST")
             twiml_response = str(response)
