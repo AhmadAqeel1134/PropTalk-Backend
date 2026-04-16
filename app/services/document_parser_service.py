@@ -348,6 +348,36 @@ async def parse_docx(file_content: bytes) -> List[Dict]:
         raise ValueError(f"Failed to parse DOCX: {str(e)}")
 
 
+async def extract_plain_text_for_kb(file_content: bytes, file_type: str) -> str:
+    """
+    Full-text extraction for knowledge-base RAG (not property-import shaping).
+    Supports pdf, docx, csv (tabular as plain text).
+    """
+    ft = (file_type or "").lower().lstrip(".")
+    if ft == "pdf":
+        try:
+            pdf_reader = PyPDF2.PdfReader(BytesIO(file_content))
+            parts: List[str] = []
+            for page in pdf_reader.pages:
+                parts.append(page.extract_text() or "")
+            return "\n".join(parts).strip()
+        except Exception as e:
+            raise ValueError(f"Failed to read PDF for KB: {str(e)}")
+    if ft == "docx":
+        try:
+            doc = Document(BytesIO(file_content))
+            return "\n".join(p.text for p in doc.paragraphs if p.text).strip()
+        except Exception as e:
+            raise ValueError(f"Failed to read DOCX for KB: {str(e)}")
+    if ft == "csv":
+        try:
+            df = detect_and_parse_csv(file_content)
+            return df.to_csv(index=False)
+        except Exception as e:
+            raise ValueError(f"Failed to read CSV for KB: {str(e)}")
+    raise ValueError(f"Unsupported KB file type: {file_type}")
+
+
 async def parse_document(file_content: bytes, file_type: str) -> Dict:
     """
     Parse document based on file type

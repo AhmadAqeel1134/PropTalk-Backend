@@ -7,7 +7,7 @@ import logging
 from typing import Optional, Dict, List, Tuple, Any
 from datetime import datetime
 import uuid
-from sqlalchemy import select, and_, or_, func, desc
+from sqlalchemy import select, and_, or_, func, desc, literal
 from sqlalchemy.orm import selectinload
 from app.database.connection import AsyncSessionLocal
 from app.models.call import Call
@@ -619,10 +619,23 @@ async def save_transcript_by_twilio_sid(
 
 
 def _end_user_phone_match(user_digits: str):
-    """PostgreSQL: digits-only match for Twilio-style from/to numbers."""
+    """
+    Match Twilio E.164 or local-style numbers to the end user's saved digits.
+
+    Exact digit match first; also match last 10 digits so +923038099142, 923038099142,
+    and 03038099142-style inputs align with how contacts/calls are stored.
+    """
+    cleaned = "".join(c for c in (user_digits or "") if c.isdigit())
+    if len(cleaned) < 10:
+        return literal(False)
+    suffix = cleaned[-10:]
+    fn = func.regexp_replace(Call.from_number, "[^0-9]", "", "g")
+    tn = func.regexp_replace(Call.to_number, "[^0-9]", "", "g")
     return or_(
-        func.regexp_replace(Call.from_number, "[^0-9]", "", "g") == user_digits,
-        func.regexp_replace(Call.to_number, "[^0-9]", "", "g") == user_digits,
+        fn == cleaned,
+        tn == cleaned,
+        func.right(fn, 10) == suffix,
+        func.right(tn, 10) == suffix,
     )
 
 

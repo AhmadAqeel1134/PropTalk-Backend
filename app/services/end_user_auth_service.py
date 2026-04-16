@@ -45,9 +45,40 @@ async def authenticate_end_user(email: str, password: str) -> Optional[dict]:
         user = result.scalar_one_or_none()
         if not user or not user.is_active:
             return None
+        # Google-only accounts have no password hash; use Google sign-in.
+        if not user.hashed_password or not user.hashed_password.strip():
+            return None
         if not verify_password(password, user.hashed_password):
             return None
         return _user_to_public_dict(user)
+
+
+async def get_or_create_end_user_from_google(google_info: dict) -> dict:
+    """Get existing end user or create one from Google OAuth (same pattern as agent)."""
+    async with AsyncSessionLocal() as session:
+        stmt = select(EndUser).where(EndUser.email == google_info["email"].lower())
+        result = await session.execute(stmt)
+        user = result.scalar_one_or_none()
+
+        if user:
+            if not user.is_active:
+                raise ValueError("Account is inactive")
+            return _user_to_public_dict(user)
+
+        user_id = str(uuid.uuid4())
+        new_user = EndUser(
+            id=user_id,
+            email=google_info["email"].lower(),
+            hashed_password="",
+            full_name=google_info.get("name", "") or google_info["email"].split("@")[0],
+            phone_number=None,
+            phone_saved_at=None,
+            is_active=True,
+        )
+        session.add(new_user)
+        await session.commit()
+        await session.refresh(new_user)
+        return _user_to_public_dict(new_user)
 
 
 async def get_end_user_by_id(user_id: str) -> Optional[dict]:

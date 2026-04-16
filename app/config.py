@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     GEMINI_MODEL: Optional[str] = "gemini-2.5-flash-lite"  # Balanced model optimized for low latency
     GEMINI_MAX_TOKENS: Optional[int] = 200  # Gemini allows more tokens
     GEMINI_TEMPERATURE: Optional[float] = 0.7
+    GEMINI_EMBEDDING_MODEL: str = "gemini-embedding-001"
+
+    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
     
     CLOUDINARY_CLOUD_NAME: str
     CLOUDINARY_API_KEY: str

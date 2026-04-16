@@ -16,11 +16,13 @@ from app.controllers.real_estate_agent.contact_controller import router as conta
 from app.controllers.real_estate_agent.dashboard_controller import router as agent_dashboard_router
 from app.controllers.real_estate_agent.property_controller import router as agent_property_router
 from app.controllers.real_estate_agent.profile_controller import router as agent_profile_router
+from app.controllers.real_estate_agent.rag_metrics_controller import router as rag_metrics_router
 from app.controllers.voice_agent_controller import router as voice_agent_router
 from app.controllers.call_controller import router as call_router
 from app.controllers.showing_controller import router as showing_router
 from app.controllers.twilio_controller.webhook_controller import router as webhook_router
 from app.controllers.end_user_controller import router as end_user_router
+from app.controllers.admin_rag_metrics_controller import router as admin_rag_metrics_router
 import logging
 import time
 
@@ -138,11 +140,13 @@ app.include_router(contact_router)
 app.include_router(agent_dashboard_router)
 app.include_router(agent_property_router)
 app.include_router(agent_profile_router)
+app.include_router(rag_metrics_router)
 app.include_router(voice_agent_router)
 app.include_router(call_router)
 app.include_router(showing_router)
 app.include_router(webhook_router)
 app.include_router(end_user_router)
+app.include_router(admin_rag_metrics_router)
 
 _assets_dir = Path(__file__).resolve().parent.parent / "assets"
 if _assets_dir.is_dir():

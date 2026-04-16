@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from app.services.google_auth_service import verify_google_token
 from app.services.auth_service import get_or_create_admin_from_google
 from app.services.real_estate_agent_auth_service import get_or_create_agent_from_google
+from app.services.end_user_auth_service import get_or_create_end_user_from_google
 from app.utils.security import create_access_token
 from app.schemas.auth import TokenResponse
 
@@ -11,7 +12,7 @@ router = APIRouter(prefix="/auth/google", tags=["Google Authentication"])
 
 class GoogleTokenRequest(BaseModel):
     token: str
-    user_type: str  # "admin" or "agent"
+    user_type: str  # "admin" | "agent" | "end_user"
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -58,11 +59,22 @@ async def google_login(request: GoogleTokenRequest):
             )
             
             return TokenResponse(access_token=access_token, token_type="bearer")
-            
+
+        elif request.user_type == "end_user":
+            end_user = await get_or_create_end_user_from_google(google_info)
+            access_token = create_access_token(
+                data={
+                    "sub": end_user["id"],
+                    "email": end_user["email"],
+                    "type": "end_user",
+                }
+            )
+            return TokenResponse(access_token=access_token, token_type="bearer")
+
         else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid user type. Must be 'admin' or 'agent'"
+                detail="Invalid user type. Must be 'admin', 'agent', or 'end_user'",
             )
             
     except ValueError as e:

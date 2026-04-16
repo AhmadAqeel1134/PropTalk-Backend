@@ -7,7 +7,7 @@ import logging
 from typing import Optional, Dict, List, Tuple
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select, and_, func, desc, or_
+from sqlalchemy import select, and_, func, desc, or_, literal
 from sqlalchemy.orm import selectinload
 
 from app.database.connection import AsyncSessionLocal
@@ -175,9 +175,17 @@ async def get_showings(
 
 def _end_user_showing_phone_clause(user_digits: str):
     """Match showings tied to this caller phone (caller_phone or linked contact)."""
+    cleaned = "".join(c for c in (user_digits or "") if c.isdigit())
+    if len(cleaned) < 10:
+        return literal(False)
+    suffix = cleaned[-10:]
+    cp = func.regexp_replace(Showing.caller_phone, "[^0-9]", "", "g")
+    cpn = func.coalesce(Contact.phone_number, "")
     return or_(
-        func.regexp_replace(Showing.caller_phone, "[^0-9]", "", "g") == user_digits,
-        Contact.phone_number == user_digits,
+        cp == cleaned,
+        Contact.phone_number == cleaned,
+        func.right(cp, 10) == suffix,
+        and_(func.length(cpn) >= 10, func.right(cpn, 10) == suffix),
     )
 
 

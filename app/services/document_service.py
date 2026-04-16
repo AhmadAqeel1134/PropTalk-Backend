@@ -8,6 +8,8 @@ from app.models.property import Property
 from app.services.cloudinary_service import upload_file_to_cloudinary, delete_file_from_cloudinary
 from app.services.document_parser_service import parse_document
 from app.services.real_estate_agent.contact_service import find_or_create_contact_by_phone
+from app.services.rag.embedding_job_service import create_embedding_job
+from app.services.rag.kb_indexing_service import run_kb_indexing
 
 
 async def upload_document(
@@ -43,6 +45,26 @@ async def upload_document(
         await session.refresh(new_document)
 
         if (upload_kind or "property_import") == "knowledge_base":
+            job = await create_embedding_job(
+                real_estate_agent_id=real_estate_agent_id,
+                document_id=document_id,
+                status="processing",
+                embedding_model="pending",
+                chunk_count=0,
+                avg_chunk_chars=0,
+                vector_dim=None,
+                processing_time_ms=0,
+                quality_score=None,
+                notes="Knowledge-base indexing started",
+                metrics_json={"upload_kind": "knowledge_base"},
+            )
+            await run_kb_indexing(
+                job_id=job["id"],
+                real_estate_agent_id=real_estate_agent_id,
+                document_id=document_id,
+                file_content=file_content,
+                file_type=file_type,
+            )
             return {
                 "id": document_id,
                 "real_estate_agent_id": real_estate_agent_id,

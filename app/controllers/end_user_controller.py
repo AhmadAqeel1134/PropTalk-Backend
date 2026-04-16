@@ -40,8 +40,11 @@ from app.services.showing_service import (
     get_showing_by_id_for_agent_and_user_phone,
 )
 from app.services.rag.rag_service import RagService, get_rag_service
+from app.services.rag.telemetry_service import create_rag_query_log
+from app.schemas.rag_metrics import RagQueryLogCreate
 from app.utils.security import create_access_token
 from app.utils.dependencies import get_current_end_user_id
+import time
 
 router = APIRouter(prefix="/user", tags=["End user portal"])
 
@@ -67,11 +70,12 @@ async def _require_phone_digits(user_id: str) -> str:
     user = await get_end_user_by_id(user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
-    digits = user.get("phone_number")
-    if not digits or len(digits) < 10:
+    raw = user.get("phone_number")
+    digits = "".join(c for c in str(raw or "") if c.isdigit())
+    if len(digits) < 10:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Add your phone number (Profile) to view your calls and showings with this agent.",
+            detail="Add your phone number (use My phone in the sidebar) to view your calls and showings with this agent.",
         )
     return digits
 
@@ -348,10 +352,54 @@ async def user_chat_with_agent_context(
     if not await get_public_agent_detail(agent_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
     digits = await _require_phone_digits(user_id)
-    out = await rag.answer_user_message(
-        real_estate_agent_id=agent_id,
-        end_user_id=user_id,
-        end_user_phone_digits=digits,
-        message=body.message,
-    )
-    return UserChatResponse(**out)
+    started_at = time.perf_counter()
+    status_value = "success"
+    out = {}
+    error_message = None
+    try:
+        out = await rag.answer_user_message(
+            real_estate_agent_id=agent_id,
+            end_user_id=user_id,
+            end_user_phone_digits=digits,
+            message=body.message,
+        )
+        return UserChatResponse(**out)
+    except Exception as e:
+        status_value = "error"
+        error_message = str(e)
+        raise
+    finally:
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        try:
+            await create_rag_query_log(
+                RagQueryLogCreate(
+                    real_estate_agent_id=agent_id,
+                    end_user_id=user_id,
+                    question=body.message,
+                    answer=out.get("answer"),
+                    status=status_value,
+                    error_message=error_message,
+                    rag_enabled=bool(out.get("rag_enabled", False)),
+                    retrieval_k=out.get("retrieval_k"),
+                    retrieved_chunks=out.get("retrieved_chunks"),
+                    context_recall_score=out.get("context_recall_score"),
+                    context_precision_score=out.get("context_precision_score"),
+                    answer_relevance_score=out.get("answer_relevance_score"),
+                    faithfulness_score=out.get("faithfulness_score"),
+                    correctness_score=out.get("correctness_score"),
+                    citation_precision_score=out.get("citation_precision_score"),
+                    hallucination_flag=out.get("hallucination_flag"),
+                    retrieval_latency_ms=out.get("retrieval_latency_ms"),
+                    generation_latency_ms=out.get("generation_latency_ms"),
+                    total_latency_ms=out.get("total_latency_ms", elapsed_ms),
+                    prompt_tokens=out.get("prompt_tokens"),
+                    completion_tokens=out.get("completion_tokens"),
+                    total_tokens=out.get("total_tokens"),
+                    estimated_cost_usd=out.get("estimated_cost_usd"),
+                    top_sources=out.get("sources", []),
+                    metadata_json=out.get("metadata_json"),
+                )
+            )
+        except Exception:
+            # Telemetry should never break chat responses.
+            pass
