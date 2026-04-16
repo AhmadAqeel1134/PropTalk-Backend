@@ -9,6 +9,10 @@ from app.models.voice_agent_request import VoiceAgentRequest
 from app.models.voice_agent import VoiceAgent
 from app.models.call import Call
 from app.models.showing import Showing
+from app.models.end_user import EndUser
+from app.models.rag_query_log import RagQueryLog
+from app.models.rag_embedding_job import RagEmbeddingJob
+from app.models.rag_document_chunk import RagDocumentChunk
 
 __all__ = [
     "Admin",
@@ -21,4 +25,8 @@ __all__ = [
     "VoiceAgent",
     "Call",
     "Showing",
+    "EndUser",
+    "RagQueryLog",
+    "RagEmbeddingJob",
+    "RagDocumentChunk",
 ]

@@ -10,6 +10,7 @@ class DocumentResponse(BaseModel):
     file_size: Optional[str] = None
     cloudinary_url: str
     description: Optional[str] = None
+    upload_kind: str = "property_import"
     properties_count: int = 0
     contacts_count: int = 0
     created_at: str
@@ -27,6 +28,7 @@ class DocumentUploadResponse(BaseModel):
     file_size: str
     cloudinary_url: str
     description: Optional[str] = None
+    upload_kind: str = "property_import"
     created_at: str
 
 

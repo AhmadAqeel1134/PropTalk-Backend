@@ -7,7 +7,7 @@ import logging
 from typing import Optional, Dict, List, Tuple, Any
 from datetime import datetime
 import uuid
-from sqlalchemy import select, and_, func, desc
+from sqlalchemy import select, and_, or_, func, desc, literal
 from sqlalchemy.orm import selectinload
 from app.database.connection import AsyncSessionLocal
 from app.models.call import Call
@@ -616,4 +616,162 @@ async def save_transcript_by_twilio_sid(
             "transcript_json": call.transcript_json,
             "user_pov_summary": call.user_pov_summary,
         }
+
+
+def _end_user_phone_match(user_digits: str):
+    """
+    Match Twilio E.164 or local-style numbers to the end user's saved digits.
+
+    Exact digit match first; also match last 10 digits so +923038099142, 923038099142,
+    and 03038099142-style inputs align with how contacts/calls are stored.
+    """
+    cleaned = "".join(c for c in (user_digits or "") if c.isdigit())
+    if len(cleaned) < 10:
+        return literal(False)
+    suffix = cleaned[-10:]
+    fn = func.regexp_replace(Call.from_number, "[^0-9]", "", "g")
+    tn = func.regexp_replace(Call.to_number, "[^0-9]", "", "g")
+    return or_(
+        fn == cleaned,
+        tn == cleaned,
+        func.right(fn, 10) == suffix,
+        func.right(tn, 10) == suffix,
+    )
+
+
+def _call_to_row(call: Call) -> Dict:
+    return {
+        "id": call.id,
+        "voice_agent_id": call.voice_agent_id,
+        "voice_agent_name": call.voice_agent.name if call.voice_agent else None,
+        "real_estate_agent_id": call.real_estate_agent_id,
+        "twilio_call_sid": call.twilio_call_sid,
+        "contact_id": call.contact_id,
+        "contact_name": call.contact.name if call.contact else None,
+        "contact_phone": call.contact.phone_number if call.contact else None,
+        "from_number": call.from_number,
+        "to_number": call.to_number,
+        "twilio_phone_number": (
+            call.voice_agent.phone_number.twilio_phone_number
+            if call.voice_agent and call.voice_agent.phone_number
+            else None
+        ),
+        "status": call.status,
+        "direction": call.direction,
+        "duration_seconds": call.duration_seconds,
+        "recording_url": call.recording_url,
+        "recording_sid": call.recording_sid,
+        "transcript": call.transcript,
+        "transcript_json": call.transcript_json,
+        "user_pov_summary": call.user_pov_summary,
+        "sentiment_label": call.sentiment_label,
+        "sentiment_scores": call.sentiment_scores,
+        "started_at": call.started_at.isoformat() if call.started_at else None,
+        "answered_at": call.answered_at.isoformat() if call.answered_at else None,
+        "ended_at": call.ended_at.isoformat() if call.ended_at else None,
+        "created_at": call.created_at.isoformat() if call.created_at else "",
+        "updated_at": call.updated_at.isoformat() if call.updated_at else "",
+    }
+
+
+async def list_calls_for_agent_and_user_phone(
+    real_estate_agent_id: str,
+    user_phone_digits: str,
+    page: int = 1,
+    page_size: int = 20,
+) -> Tuple[List[Dict], int]:
+    """Calls where the end user's phone matches from_number or to_number (same agent)."""
+    async with AsyncSessionLocal() as session:
+        base = and_(
+            Call.real_estate_agent_id == real_estate_agent_id,
+            _end_user_phone_match(user_phone_digits),
+        )
+        count_stmt = select(func.count(Call.id)).select_from(Call).where(base)
+        total = (await session.execute(count_stmt)).scalar_one() or 0
+
+        stmt = (
+            select(Call)
+            .options(
+                selectinload(Call.contact),
+                selectinload(Call.voice_agent).selectinload(VoiceAgent.phone_number),
+            )
+            .where(base)
+            .order_by(desc(Call.created_at))
+            .offset(max(page - 1, 0) * page_size)
+            .limit(page_size)
+        )
+        result = await session.execute(stmt)
+        calls = result.scalars().all()
+        items = [_call_to_row(c) for c in calls]
+        items = await enrich_calls_with_sentiment(items)
+        return items, total
+
+
+async def get_call_by_id_for_agent_and_user_phone(
+    call_id: str,
+    real_estate_agent_id: str,
+    user_phone_digits: str,
+) -> Optional[Dict]:
+    async with AsyncSessionLocal() as session:
+        stmt = (
+            select(Call)
+            .options(
+                selectinload(Call.contact),
+                selectinload(Call.voice_agent).selectinload(VoiceAgent.phone_number),
+            )
+            .where(
+                and_(
+                    Call.id == call_id,
+                    Call.real_estate_agent_id == real_estate_agent_id,
+                    _end_user_phone_match(user_phone_digits),
+                )
+            )
+        )
+        result = await session.execute(stmt)
+        call = result.scalar_one_or_none()
+        if not call:
+            return None
+        row = _call_to_row(call)
+        enriched = await enrich_calls_with_sentiment([row])
+        return enriched[0] if enriched else None
+
+
+async def fetch_twilio_recording_bytes(recording_url: str) -> Tuple[bytes, str]:
+    """
+    Download recording from Twilio (Basic auth). Returns (body, content_type).
+    Used by agent and end-user recording proxies.
+    """
+    import base64
+    import httpx
+
+    if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN:
+        raise ValueError("Twilio credentials not configured")
+
+    credentials = f"{settings.TWILIO_ACCOUNT_SID}:{settings.TWILIO_AUTH_TOKEN}"
+    encoded_credentials = base64.b64encode(credentials.encode()).decode()
+    auth_header = f"Basic {encoded_credentials}"
+
+    twilio_url = recording_url
+    if not twilio_url.endswith((".mp3", ".wav", ".m4a")):
+        if "api.twilio.com" in twilio_url and "/Recordings/" in twilio_url:
+            twilio_url = f"{recording_url}.mp3"
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            twilio_url,
+            headers={
+                "Authorization": auth_header,
+                "Accept": "audio/mpeg, audio/mp3, */*",
+            },
+            timeout=30.0,
+            follow_redirects=True,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Twilio recording HTTP {response.status_code}: {response.text[:200]}"
+            )
+        content_type = response.headers.get("content-type", "audio/mpeg")
+        if "audio" not in content_type:
+            content_type = "audio/mpeg"
+        return response.content, content_type
 

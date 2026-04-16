@@ -20,6 +20,7 @@ router = APIRouter(prefix="/documents", tags=["Documents"])
 async def upload_document_endpoint(
     file: UploadFile = File(...),
     description: Optional[str] = Form(None),
+    upload_kind: Optional[str] = Form("property_import"),
     agent_id: str = Depends(get_current_real_estate_agent_id)
 ):
     """Upload document (CSV, PDF, DOCX) and extract properties"""
@@ -42,12 +43,19 @@ async def upload_document_endpoint(
         )
     
     try:
+        kind = (upload_kind or "property_import").strip()
+        if kind not in ("property_import", "knowledge_base"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="upload_kind must be property_import or knowledge_base",
+            )
         document = await upload_document(
             real_estate_agent_id=agent_id,
             file_content=file_content,
             file_name=file.filename,
             file_type=file_extension,
-            description=description
+            description=description,
+            upload_kind=kind,
         )
         return DocumentUploadResponse(**document)
     except ValueError as e:

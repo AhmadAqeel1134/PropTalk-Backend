@@ -15,6 +15,7 @@ class Document(Base):
     cloudinary_public_id = Column(String, unique=True, nullable=False)
     cloudinary_url = Column(String, nullable=False)
     description = Column(String, nullable=True)
+    upload_kind = Column(String, nullable=False, default="property_import")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     

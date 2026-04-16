@@ -7,7 +7,7 @@ import logging
 from typing import Optional, Dict, List, Tuple
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select, and_, func, desc, or_
+from sqlalchemy import select, and_, func, desc, or_, literal
 from sqlalchemy.orm import selectinload
 
 from app.database.connection import AsyncSessionLocal
@@ -171,6 +171,87 @@ async def get_showings(
 
         items = [await _showing_to_dict(session, s) for s in showings]
         return items, total
+
+
+def _end_user_showing_phone_clause(user_digits: str):
+    """Match showings tied to this caller phone (caller_phone or linked contact)."""
+    cleaned = "".join(c for c in (user_digits or "") if c.isdigit())
+    if len(cleaned) < 10:
+        return literal(False)
+    suffix = cleaned[-10:]
+    cp = func.regexp_replace(Showing.caller_phone, "[^0-9]", "", "g")
+    cpn = func.coalesce(Contact.phone_number, "")
+    return or_(
+        cp == cleaned,
+        Contact.phone_number == cleaned,
+        func.right(cp, 10) == suffix,
+        and_(func.length(cpn) >= 10, func.right(cpn, 10) == suffix),
+    )
+
+
+async def list_showings_for_agent_and_user_phone(
+    real_estate_agent_id: str,
+    user_phone_digits: str,
+    page: int = 1,
+    page_size: int = 20,
+) -> Tuple[List[Dict], int]:
+    async with AsyncSessionLocal() as session:
+        base = and_(
+            Showing.real_estate_agent_id == real_estate_agent_id,
+            _end_user_showing_phone_clause(user_phone_digits),
+        )
+        count_stmt = (
+            select(func.count(Showing.id))
+            .select_from(Showing)
+            .outerjoin(Contact, Showing.contact_id == Contact.id)
+            .where(base)
+        )
+        total = (await session.execute(count_stmt)).scalar() or 0
+
+        stmt = (
+            select(Showing)
+            .options(
+                selectinload(Showing.contact),
+                selectinload(Showing.property),
+            )
+            .outerjoin(Contact, Showing.contact_id == Contact.id)
+            .where(base)
+            .order_by(desc(Showing.scheduled_start))
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        result = await session.execute(stmt)
+        showings = result.scalars().unique().all()
+        items = [await _showing_to_dict(session, s) for s in showings]
+        return items, total
+
+
+async def get_showing_by_id_for_agent_and_user_phone(
+    showing_id: str,
+    real_estate_agent_id: str,
+    user_phone_digits: str,
+) -> Optional[Dict]:
+    async with AsyncSessionLocal() as session:
+        stmt = (
+            select(Showing)
+            .options(
+                selectinload(Showing.contact),
+                selectinload(Showing.property),
+            )
+            .outerjoin(Contact, Showing.contact_id == Contact.id)
+            .where(
+                and_(
+                    Showing.id == showing_id,
+                    Showing.real_estate_agent_id == real_estate_agent_id,
+                    _end_user_showing_phone_clause(user_phone_digits),
+                )
+            )
+        )
+        result = await session.execute(stmt)
+        showing = result.scalar_one_or_none()
+        if not showing:
+            return None
+        return await _showing_to_dict(session, showing)
 
 
 async def get_showing_by_id(

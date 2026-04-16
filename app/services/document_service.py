@@ -8,6 +8,8 @@ from app.models.property import Property
 from app.services.cloudinary_service import upload_file_to_cloudinary, delete_file_from_cloudinary
 from app.services.document_parser_service import parse_document
 from app.services.real_estate_agent.contact_service import find_or_create_contact_by_phone
+from app.services.rag.embedding_job_service import create_embedding_job
+from app.services.rag.kb_indexing_service import run_kb_indexing
 
 
 async def upload_document(
@@ -15,7 +17,8 @@ async def upload_document(
     file_content: bytes,
     file_name: str,
     file_type: str,
-    description: Optional[str] = None
+    description: Optional[str] = None,
+    upload_kind: str = "property_import",
 ) -> dict:
     """Upload document to Cloudinary and save metadata to database"""
     async with AsyncSessionLocal() as session:
@@ -34,11 +37,45 @@ async def upload_document(
             cloudinary_public_id=cloudinary_data["cloudinary_public_id"],
             cloudinary_url=cloudinary_data["cloudinary_url"],
             description=description,
+            upload_kind=upload_kind or "property_import",
         )
         
         session.add(new_document)
         await session.commit()
         await session.refresh(new_document)
+
+        if (upload_kind or "property_import") == "knowledge_base":
+            job = await create_embedding_job(
+                real_estate_agent_id=real_estate_agent_id,
+                document_id=document_id,
+                status="processing",
+                embedding_model="pending",
+                chunk_count=0,
+                avg_chunk_chars=0,
+                vector_dim=None,
+                processing_time_ms=0,
+                quality_score=None,
+                notes="Knowledge-base indexing started",
+                metrics_json={"upload_kind": "knowledge_base"},
+            )
+            await run_kb_indexing(
+                job_id=job["id"],
+                real_estate_agent_id=real_estate_agent_id,
+                document_id=document_id,
+                file_content=file_content,
+                file_type=file_type,
+            )
+            return {
+                "id": document_id,
+                "real_estate_agent_id": real_estate_agent_id,
+                "file_name": file_name,
+                "file_type": file_type,
+                "file_size": str(file_size),
+                "cloudinary_url": cloudinary_data["cloudinary_url"],
+                "description": description,
+                "upload_kind": new_document.upload_kind,
+                "created_at": new_document.created_at.isoformat() if new_document.created_at else "",
+            }
         
         # Parse document and extract properties + contacts
         try:
@@ -150,6 +187,7 @@ async def upload_document(
             "file_size": str(file_size),
             "cloudinary_url": cloudinary_data["cloudinary_url"],
             "description": description,
+            "upload_kind": new_document.upload_kind,
             "created_at": new_document.created_at.isoformat() if new_document.created_at else "",
         }
 
@@ -200,6 +238,7 @@ async def get_documents_by_agent_id(real_estate_agent_id: str) -> List[dict]:
                 "file_size": doc.file_size,
                 "cloudinary_url": doc.cloudinary_url,
                 "description": doc.description,
+                "upload_kind": getattr(doc, "upload_kind", None) or "property_import",
                 "properties_count": properties_counts.get(doc.id, 0),
                 "contacts_count": contacts_counts.get(doc.id, 0),
                 "created_at": doc.created_at.isoformat() if doc.created_at else "",

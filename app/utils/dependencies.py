@@ -3,6 +3,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.utils.security import decode_access_token
 from app.services.auth_service import get_admin_by_id
 from app.services.real_estate_agent_auth_service import get_real_estate_agent_by_id
+from app.services.end_user_auth_service import get_end_user_by_id
 
 security = HTTPBearer()
 
@@ -91,4 +92,44 @@ async def get_current_real_estate_agent_id(
         )
     
     return agent_id
+
+
+async def get_current_end_user_id(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+) -> str:
+    token = credentials.credentials
+    payload = decode_access_token(token)
+
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token_type = payload.get("type")
+    if token_type != "end_user":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid token type for this endpoint",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user_id: str = payload.get("sub")
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user = await get_end_user_by_id(user_id)
+    if not user or not user.get("is_active"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or inactive",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return user_id
 
